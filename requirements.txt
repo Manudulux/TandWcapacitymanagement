@@ -4,3 +4,4 @@ altair
 openpyxl
 xlsxwriter
 plotly
+duckdb
