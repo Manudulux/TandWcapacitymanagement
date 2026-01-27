@@ -4,9 +4,20 @@ import os
 import re
 import duckdb
 
-PARQUET_DIR = "parquet_cache"
+# --- Page Configuration ---
+st.set_page_config(page_title="Supply Chain Planning Dashboard", layout="wide")
 
+# --- Constants ---
+NPI_COLUMNS = ['BlockedStockQty', 'QualityInspectionQty', 'OveragedTireQty']
+ALL_STOCK_COLUMNS = [
+    'PhysicalStock', 'OveragedTireQty', 'IntransitQty',
+    'QualityInspectionQty', 'BlockedStockQty', 'ATPonHand'
+]
+
+# --- Parquet Directory ---
+PARQUET_DIR = "parquet_cache"
 os.makedirs(PARQUET_DIR, exist_ok=True)
+
 
 def parquet_path(label: str) -> str:
     return os.path.join(PARQUET_DIR, f"{label.replace(' ', '_')}.parquet")
@@ -31,21 +42,8 @@ def load_parquet_if_exists(label: str):
     return None
 
 
-
-# --- Page Configuration ---
-st.set_page_config(page_title="Supply Chain Planning Dashboard", layout="wide")
-
-# --- Constants ---
-NPI_COLUMNS = ['BlockedStockQty', 'QualityInspectionQty', 'OveragedTireQty']
-ALL_STOCK_COLUMNS = [
-    'PhysicalStock', 'OveragedTireQty', 'IntransitQty',
-    'QualityInspectionQty', 'BlockedStockQty', 'ATPonHand'
-]
-
-
-# --- 1. Week String Parsing Logic ---
+# --- Specialized parsing for BDD400 week strings ---
 def parse_week_string(week_str):
-    """Converts 'W 2026 / 04' into a datetime object (Monday of that week)."""
     try:
         match = re.search(r'W\s*(\d{4})\s*/\s*(\d{1,2})', str(week_str))
         if match:
@@ -56,7 +54,7 @@ def parse_week_string(week_str):
     return week_str
 
 
-# --- 2. File Loading Logic ---
+# --- Load Excel/CSV Files ---
 def load_file_content(file_path_or_buffer, label):
     try:
         # Load Raw Data
@@ -72,12 +70,12 @@ def load_file_content(file_path_or_buffer, label):
             except:
                 df = pd.read_csv(file_path_or_buffer)
 
-        # Format Handling for BDD400 (Week Strings)
+        # Format Handling for BDD400 (week strings)
         if label == "BDD400" and 'DateStamp' in df.columns:
             df['DateStamp'] = df['DateStamp'].apply(parse_week_string)
             df = df.dropna(subset=['DateStamp'])
 
-        # Standard Datetime Parsing for others
+        # Standard Datetime Parsing
         elif 'DateStamp' in df.columns:
             df['DateStamp'] = pd.to_datetime(df['DateStamp'], errors='coerce')
             df = df.dropna(subset=['DateStamp'])
@@ -89,7 +87,7 @@ def load_file_content(file_path_or_buffer, label):
         return None
 
 
-# --- 3. Session State Initialization ---
+# --- Session State Init ---
 if 'data' not in st.session_state:
     st.session_state['data'] = {
         "Stock History": None,
@@ -99,8 +97,8 @@ if 'data' not in st.session_state:
     }
 
 
-# --- 4. DuckDB-based NPI Aging Computation ---
-@st.cache_data(show_spinner=False)
+# --- DUCKDB NPI Aging Calculation ---
+@st.cache_data(show_spinner=False, key="npi_duckdb")
 def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.DataFrame:
     """
     Uses DuckDB window functions to compute 'days since last zero'
@@ -115,7 +113,7 @@ def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.D
     con = duckdb.connect()
     con.register("stock", df2)
 
-    # Build expressions for all categories
+    # Build SQL fields for each NPI category
     fields = []
     for c in npi_categories:
         fields.append(f"""
@@ -126,7 +124,8 @@ def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.D
                     ORDER BY DateStamp
                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                 ) AS last_zero_{c},
-            DATE_DIFF('day',
+            DATE_DIFF(
+                'day',
                 COALESCE(
                     MAX(CASE WHEN {c} = 0 THEN DateStamp END)
                         OVER (
@@ -153,7 +152,7 @@ def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.D
     return result
 
 
-# --- 5. Sidebar Navigation ---
+# --- Sidebar ---
 st.sidebar.title("App Navigation")
 selection = st.sidebar.radio("Go to:", [
     "Data load",
@@ -163,7 +162,7 @@ selection = st.sidebar.radio("Go to:", [
 ])
 
 
-# --- 6. DATA LOAD PAGE ---
+# --- DATA LOAD PAGE ---
 if selection == "Data load":
     st.header("📂 Data Management")
 
@@ -185,28 +184,46 @@ if selection == "Data load":
             )
 
             if up is not None:
-                st.session_state['data'][label] = load_file_content(up, label)
+                df_loaded = load_file_content(up, label)
+                st.session_state['data'][label] = df_loaded
+                if df_loaded is not None:
+                    save_as_parquet(df_loaded, label)
+                    st.cache_data.clear()  # << IMPORTANT FIX
 
-            elif st.session_state['data'][label] is None and os.path.exists(fname):
-                local_path = fname if os.path.exists(fname) else fname.replace(".xlsx", ".csv")
-                if os.path.exists(local_path):
-                    st.session_state['data'][label] = load_file_content(local_path, label)
+            # If nothing uploaded, try Parquet first
+            elif st.session_state['data'][label] is None:
+                df_parquet = load_parquet_if_exists(label)
+                if df_parquet is not None:
+                    st.session_state['data'][label] = df_parquet
+                    continue
 
-            # Status badge
+                # Fallback to legacy Excel/CSV
+                if os.path.exists(fname):
+                    df_loaded = load_file_content(fname, label)
+                else:
+                    alt = fname.replace(".xlsx", ".csv")
+                    df_loaded = load_file_content(alt, label) if os.path.exists(alt) else None
+
+                if df_loaded is not None:
+                    st.session_state['data'][label] = df_loaded
+                    save_as_parquet(df_loaded, label)
+                    st.cache_data.clear()  # << IMPORTANT FIX
+
+            # Status indicator
             if st.session_state['data'][label] is not None:
                 st.success(f"✅ {label} Active")
             else:
                 st.warning(f"⚠️ {label} missing or failed to parse.")
 
 
-# --- 7. NPI MANAGEMENT PAGE ---
+# --- NPI MANAGEMENT PAGE ---
 elif selection == "Non‑Productive Inventory (NPI) Management":
     st.header("📉 Non‑Productive Inventory (NPI) Management")
 
     df = st.session_state['data'].get("Stock History")
 
     if df is not None:
-        # USE DUCKDB ENGINE
+        # Compute DuckDB-derived NPI aging
         df_aug = compute_npi_days_duckdb(df, NPI_COLUMNS)
 
         latest_date = df_aug['DateStamp'].max()
@@ -229,7 +246,7 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
             st.subheader("Inventory by Material with Accumulation Days")
 
             col_a, col_b = st.columns([2, 1])
-            all_plants = sorted(df_latest['PlantID'].unique().tolist())
+            all_plants = sorted(df_latest['PlantID'].unique())
 
             with col_a:
                 selected_plants = st.multiselect(
@@ -238,12 +255,11 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
 
             with col_b:
                 sort_category = st.selectbox(
-                    "Analyze & Sort By:", options=NPI_COLUMNS, index=0
+                    "Analyze & Sort By:", options=NPI_COLUMNS
                 )
 
             mat_latest = df_latest[df_latest['PlantID'].isin(selected_plants)]
 
-            # Aggregate material view
             agg_dict = {
                 **{c: "sum" for c in (NPI_COLUMNS + ["PhysicalStock"])},
                 **{f"DaysSinceZero_{c}": "max" for c in NPI_COLUMNS}
@@ -282,7 +298,7 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
             )
 
             trend_df = (
-                df_aug[df_aug['PlantID'].isin(plant_trend_filter)]
+                df_aug[df_aug["PlantID"].isin(plant_trend_filter)]
                 .groupby('DateStamp')[NPI_COLUMNS]
                 .sum()
                 .reset_index()
@@ -298,7 +314,8 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
         st.error("Please upload 'Stock History' data first.")
 
 
-# --- 8. OTHER PAGES PLACEHOLDER ---
+# --- PLACEHOLDERS FOR OTHER PAGES ---
 else:
     st.header(selection)
     st.info("Implementation pending.")
+``
