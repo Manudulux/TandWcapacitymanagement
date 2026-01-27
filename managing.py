@@ -96,13 +96,18 @@ if 'data' not in st.session_state:
         "T&W Forecasts": None
     }
 
+# Version token to break cache when new data arrives
+if 'data_version' not in st.session_state:
+    st.session_state['data_version'] = 0
+
 
 # --- DUCKDB NPI Aging Calculation ---
 @st.cache_data(show_spinner=False)
-def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.DataFrame:
+def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str], version: int) -> pd.DataFrame:
     """
     Uses DuckDB window functions to compute 'days since last zero'
     for all NPI categories in one vectorized SQL pass.
+    The 'version' argument is not used inside but ensures cache invalidation.
     """
     df2 = df.copy()
 
@@ -182,30 +187,34 @@ if selection == "Data load":
             )
 
             if up is not None:
+                # USER UPLOAD -> save, clear caches, bump version, rerun
                 df_loaded = load_file_content(up, label)
                 st.session_state['data'][label] = df_loaded
                 if df_loaded is not None:
                     save_as_parquet(df_loaded, label)
-                    st.cache_data.clear()  # IMPORTANT: refresh DuckDB computations
+                    st.cache_data.clear()
+                    st.session_state['data_version'] += 1
+                    st.rerun()
 
-            # If nothing uploaded, try Parquet first
             elif st.session_state['data'][label] is None:
+                # Prefer Parquet on disk (no rerun here to avoid loops)
                 df_parquet = load_parquet_if_exists(label)
                 if df_parquet is not None:
                     st.session_state['data'][label] = df_parquet
-                    continue
-
-                # Fallback to legacy Excel/CSV
-                if os.path.exists(fname):
-                    df_loaded = load_file_content(fname, label)
                 else:
-                    alt = fname.replace(".xlsx", ".csv")
-                    df_loaded = load_file_content(alt, label) if os.path.exists(alt) else None
+                    # Legacy local Excel/CSV fallback (first-time local run)
+                    if os.path.exists(fname):
+                        df_loaded = load_file_content(fname, label)
+                    else:
+                        alt = fname.replace(".xlsx", ".csv")
+                        df_loaded = load_file_content(alt, label) if os.path.exists(alt) else None
 
-                if df_loaded is not None:
-                    st.session_state['data'][label] = df_loaded
-                    save_as_parquet(df_loaded, label)
-                    st.cache_data.clear()  # IMPORTANT
+                    if df_loaded is not None:
+                        st.session_state['data'][label] = df_loaded
+                        save_as_parquet(df_loaded, label)
+                        st.cache_data.clear()
+                        st.session_state['data_version'] += 1
+                        st.rerun()
 
             # Status indicator
             if st.session_state['data'][label] is not None:
@@ -221,8 +230,8 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
     df = st.session_state['data'].get("Stock History")
 
     if df is not None:
-        # Compute DuckDB-derived NPI aging
-        df_aug = compute_npi_days_duckdb(df, NPI_COLUMNS)
+        # Compute DuckDB-derived NPI aging (version guarantees recompute)
+        df_aug = compute_npi_days_duckdb(df, NPI_COLUMNS, st.session_state['data_version'])
 
         latest_date = df_aug['DateStamp'].max()
         df_latest = df_aug[df_aug['DateStamp'] == latest_date]
