@@ -1,125 +1,126 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime
+import os
 
-# --- CONFIGURATION & UTILS ---
-st.set_page_config(page_title="Supply Chain Hub", layout="wide")
+# --- Page Configuration ---
+st.set_page_config(page_title="Supply Chain Planning Dashboard", layout="wide")
 
-def standardize_data(df):
-    """Standardizes column names and date formats across modules."""
-    df.columns = [c.strip().lower().replace(" ", "_").replace("-", "_") for c in df.columns]
-    # Standardizing Plant Keys (User Story: Cross-Module consistency)
-    if 'plant' in df.columns:
-        df['plant_key'] = df['plant'].astype(str).str.upper()
-    return df
+# --- Constants & Configuration ---
+# Map labels to the exact filenames expected locally
+FILES_CONFIG = {
+    "BDD400": {
+        "filename": "003BDD400.xlsx",
+        "help": "Load the BDD400 closing stock and production data."
+    },
+    "Plant Capacity": {
+        "filename": "PlantCapacity.xlsx",
+        "help": "Load the maximum storage and plant capacity limits."
+    },
+    "Stock History": {
+        "filename": "StockHistory.xlsx",
+        "help": "Load historical stock levels and aging data."
+    },
+    "T&W Forecasts": {
+        "filename": "TWforecasts.xlsx",
+        "help": "Load the transport and warehouse forecast projections."
+    }
+}
 
-def get_download_link(df, filename="data.csv"):
-    """Generates a download link for CSV."""
-    csv = df.to_csv(index=False)
-    return st.download_button(label=f"📥 Download {filename}", data=csv, file_name=filename, mime='text/csv')
+# --- Sidebar Navigation ---
+st.sidebar.title("App Navigation")
+selection = st.sidebar.radio("Go to:", [
+    "Data load", 
+    "Non‑Productive Inventory (NPI) Management", 
+    "Planning Overview — T&W Forecast Projection", 
+    "Planning Overview — BDD400 Closing Stock", 
+    "Storage Capacity Management", 
+    "Mitigation Proposal"
+])
 
-# --- MODULES ---
+# Initialize Session State
+if 'data' not in st.session_state:
+    st.session_state['data'] = {key: None for key in FILES_CONFIG.keys()}
 
-def module_npi(df):
-    st.header("📦 Non-Productive Inventory (NPI) Management")
+# --- Helper Function ---
+def process_file(label, filename, uploaded_file):
+    """Priority: 1. Uploaded File, 2. Local File, 3. None"""
+    df = None
+    source = ""
     
-    # Filters (User Story: Filter by Brand, AB, Hier2, etc.)
-    cols = st.columns(4)
-    brand = cols[0].multiselect("Brand", options=df['brand'].unique())
-    hier = cols[1].multiselect("Hier4", options=df['hier4'].unique())
-    
-    filtered_df = df.copy()
-    if brand: filtered_df = filtered_df[filtered_df['brand'].isin(brand)]
-    
-    # Calculate Last Zero Date (User Story: Measure accumulation)
-    # Logic: Group by material, find max date where quantity was 0
-    st.subheader("Accumulation Analysis")
-    # (Simplified logic for demonstration)
-    filtered_df['date'] = pd.to_datetime(filtered_df['date'])
-    
-    fig = px.line(filtered_df, x='date', y='quantity', color='plant_key', title="NPI Quantities Over Time")
-    st.plotly_chart(fig, use_container_width=True)
-
-def module_planning_projection(forecast_df, inventory_df):
-    st.header("📈 T&W Forecast Projection")
-    
-    plant = st.selectbox("Select Plant", options=forecast_df['plant_key'].unique())
-    starting_stock = st.number_input("Manual Starting Stock Override", value=0)
-    
-    # Logic: Stock(t) = Stock(t-1) + Load - Unload
-    # User Story: Automatically clean and aggregate
-    proj = forecast_df[forecast_df['plant_key'] == plant].groupby('week').sum().reset_index()
-    proj['projected_stock'] = starting_stock + (proj['load'].cumsum() - proj['unload'].cumsum())
-    
-    fig = px.bar(proj, x='week', y='projected_stock', title=f"Inventory Evolution: {plant}")
-    st.plotly_chart(fig, use_container_width=True)
-    get_download_link(proj, f"projection_{plant}.csv")
-
-def module_capacity(capacity_df, stock_df):
-    st.header("🏭 Storage Capacity Management")
-    
-    # Merge on PlantKey (User Story: Standardized PlantKey matching)
-    merged = pd.merge(stock_df, capacity_df, on='plant_key', how='inner')
-    merged['utilization'] = (merged['current_stock'] / merged['max_capacity']) * 100
-    
-    # Heatmap (User Story: Risks visually apparent)
-    fig = px.density_heatmap(merged, x="week", y="plant_key", z="utilization", 
-                             color_continuous_scale="RdYlGn_r", title="Capacity Utilization Heatmap (%)")
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Status Indicators
-    merged['status'] = merged['utilization'].apply(lambda x: '🔴 Over' if x > 100 else ('🟡 Near' if x > 85 else '🟢 Safe'))
-    st.table(merged[['plant_key', 'current_stock', 'max_capacity', 'utilization', 'status']].tail(10))
-
-# --- MAIN APP FLOW ---
-
-def main():
-    st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["Upload Center", "NPI Management", "Planning Overview", "Capacity Management", "Mitigation Proposal"])
-
-    if "datasets" not in st.session_state:
-        st.session_state.datasets = {}
-
-    if page == "Upload Center":
-        st.header("📂 Data Ingestion")
-        uploaded_files = st.file_uploader("Upload Supply Chain Files (CSV/XLSX)", accept_multiple_files=True)
-        
-        if uploaded_files:
-            for file in uploaded_files:
-                if file.name.endswith('.csv'):
-                    df = pd.read_csv(file)
-                else:
-                    df = pd.read_excel(file)
-                
-                clean_df = standardize_data(df)
-                st.session_state.datasets[file.name] = clean_df
-                st.success(f"Successfully processed {file.name}")
+    if uploaded_file is not None:
+        try:
+            df = pd.read_excel(uploaded_file)
+            source = "Uploaded"
+        except Exception as e:
+            st.error(f"Error reading uploaded {filename}: {e}")
+    elif os.path.exists(filename):
+        try:
+            df = pd.read_excel(filename)
+            source = "Local (Default)"
+        except Exception as e:
+            st.error(f"Error reading local {filename}: {e}")
             
-            st.info(f"Data Integrity Report: {len(st.session_state.datasets)} modules loaded.")
+    return df, source
 
-    # Check if data exists before loading modules
-    if not st.session_state.datasets:
-        st.warning("Please upload datasets in the Upload Center to begin.")
-        return
+# --- SECTION 1: Data Load ---
+if selection == "Data load":
+    st.header("📂 Data Management")
+    st.write("Each section below looks for a default file in the script folder. You can override them by uploading a new version.")
 
-    # Routing
-    if page == "NPI Management":
-        # Assumes a file with 'npi' in name exists
-        npi_data = next((df for name, df in st.session_state.datasets.items() if 'npi' in name.lower()), None)
-        if npi_data is not None: module_npi(npi_data)
-        
-    elif page == "Planning Overview":
-        # Logic for T&W Projection
-        st.write("Projecting inventory based on uploaded Forecast and BDD files.")
-        # (Pass relevant dataframes from session_state here)
+    # Create a grid of 2x2 for the loaders
+    cols = st.columns(2)
+    
+    for i, (label, config) in enumerate(FILES_CONFIG.items()):
+        with cols[i % 2]:
+            st.subheader(f"{label}")
+            # Specific loader for this file
+            uploaded_file = st.file_uploader(
+                f"Upload {config['filename']}", 
+                type=["xlsx"], 
+                key=f"loader_{label}",
+                help=config['help']
+            )
+            
+            # Process the logic
+            df, source = process_file(label, config['filename'], uploaded_file)
+            
+            if df is not None:
+                st.session_state['data'][label] = df
+                st.success(f"✅ Loaded from {source}")
+                with st.expander(f"Preview {label} Data"):
+                    st.dataframe(df.head(5), use_container_width=True)
+            else:
+                st.error(f"❌ Missing: {config['filename']}")
 
-    elif page == "Capacity Management":
-        cap_data = next((df for name, df in st.session_state.datasets.items() if 'cap' in name.lower()), None)
-        stock_data = next((df for name, df in st.session_state.datasets.items() if 'bdd' in name.lower()), None)
-        if cap_data is not None and stock_data is not None:
-            module_capacity(cap_data, stock_data)
+# --- PLACEHOLDER SECTIONS ---
+elif selection == "Non‑Productive Inventory (NPI) Management":
+    st.header("📉 Non‑Productive Inventory (NPI) Management")
+    if st.session_state['data']["Stock History"] is not None:
+        st.write("Using data from Stock History...")
+    else:
+        st.warning("Please upload Stock History in the Data Load section.")
 
-if __name__ == "__main__":
-    main()
+elif selection == "Planning Overview — T&W Forecast Projection":
+    st.header("📈 Planning Overview — T&W Forecast Projection")
+    if st.session_state['data']["T&W Forecasts"] is not None:
+        st.write("Using data from T&W Forecasts...")
+    else:
+        st.warning("Please upload T&W Forecasts in the Data Load section.")
+
+elif selection == "Planning Overview — BDD400 Closing Stock":
+    st.header("📦 Planning Overview — BDD400 Closing Stock")
+    if st.session_state['data']["BDD400"] is not None:
+        st.write("Using data from BDD400...")
+    else:
+        st.warning("Please upload BDD400 file in the Data Load section.")
+
+elif selection == "Storage Capacity Management":
+    st.header("🏗️ Storage Capacity Management")
+    if st.session_state['data']["Plant Capacity"] is not None:
+        st.write("Using data from Plant Capacity...")
+    else:
+        st.warning("Please upload Plant Capacity in the Data Load section.")
+
+elif selection == "Mitigation Proposal":
+    st.header("🛡️ Mitigation Proposal")
+    st.info("Analysis logic to be implemented.")
