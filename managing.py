@@ -98,7 +98,7 @@ if 'data' not in st.session_state:
 
 
 # --- DUCKDB NPI Aging Calculation ---
-@st.cache_data(show_spinner=False, key="npi_duckdb")
+@st.cache_data(show_spinner=False)
 def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.DataFrame:
     """
     Uses DuckDB window functions to compute 'days since last zero'
@@ -140,9 +140,7 @@ def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.D
         """)
 
     sql = f"""
-        SELECT
-            *,
-            {",".join(fields)}
+        SELECT *, {",".join(fields)}
         FROM stock
         ORDER BY SapCode, PlantID, DateStamp
     """
@@ -188,7 +186,7 @@ if selection == "Data load":
                 st.session_state['data'][label] = df_loaded
                 if df_loaded is not None:
                     save_as_parquet(df_loaded, label)
-                    st.cache_data.clear()  # << IMPORTANT FIX
+                    st.cache_data.clear()  # IMPORTANT: refresh DuckDB computations
 
             # If nothing uploaded, try Parquet first
             elif st.session_state['data'][label] is None:
@@ -207,7 +205,7 @@ if selection == "Data load":
                 if df_loaded is not None:
                     st.session_state['data'][label] = df_loaded
                     save_as_parquet(df_loaded, label)
-                    st.cache_data.clear()  # << IMPORTANT FIX
+                    st.cache_data.clear()  # IMPORTANT
 
             # Status indicator
             if st.session_state['data'][label] is not None:
@@ -318,3 +316,7 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
 else:
     st.header(selection)
     st.info("Implementation pending.")
+
+
+
+
