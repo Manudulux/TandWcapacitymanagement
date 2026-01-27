@@ -3,3 +3,4 @@ pandas
 altair
 openpyxl
 xlsxwriter
+plotly
