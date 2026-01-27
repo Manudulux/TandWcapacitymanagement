@@ -318,4 +318,3 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
 else:
     st.header(selection)
     st.info("Implementation pending.")
-``
