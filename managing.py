@@ -5,127 +5,141 @@ import os
 # --- Page Configuration ---
 st.set_page_config(page_title="Supply Chain Planning Dashboard", layout="wide")
 
-# --- Constants & Configuration ---
-FILES_CONFIG = {
-    "BDD400": {"filename": "003BDD400.xlsx"},
-    "Plant Capacity": {"filename": "PlantCapacity.xlsx"},
-    "Stock History": {"filename": "StockHistory.xlsx"},
-    "T&W Forecasts": {"filename": "TWforecasts.xlsx"}
-}
+# --- Constants ---
+NPI_COLUMNS = ['BlockedStockQty', 'QualityInspectionQty', 'OveragedTireQty']
+ALL_STOCK_COLUMNS = ['PhysicalStock', 'OveragedTireQty', 'IntransitQty', 'QualityInspectionQty', 'BlockedStockQty', 'ATPonHand']
 
-# --- 1. Robust Data Loading Logic ---
+# --- 1. Data Loading Logic ---
 def load_file_content(file_path_or_buffer):
-    """Try reading as Excel, fallback to CSV."""
     try:
-        return pd.read_excel(file_path_or_buffer)
-    except Exception:
+        # Try reading as Excel, then CSV
         try:
-            return pd.read_csv(file_path_or_buffer)
-        except Exception as e:
-            st.error(f"Could not read file: {e}")
-            return None
+            df = pd.read_excel(file_path_or_buffer)
+        except:
+            df = pd.read_csv(file_path_or_buffer)
+        
+        # Standardize Date Column
+        if 'DateStamp' in df.columns:
+            df['DateStamp'] = pd.to_datetime(df['DateStamp'])
+        return df
+    except Exception as e:
+        st.error(f"Error loading file: {e}")
+        return None
 
-# Initialize Session State and Auto-load local files on first run
+# Initialize Session State
 if 'data' not in st.session_state:
-    st.session_state['data'] = {}
-    for label, config in FILES_CONFIG.items():
-        if os.path.exists(config['filename']):
-            st.session_state['data'][label] = load_file_content(config['filename'])
-        else:
-            st.session_state['data'][label] = None
+    st.session_state['data'] = {"Stock History": None, "BDD400": None, "Plant Capacity": None, "T&W Forecasts": None}
 
 # --- Sidebar Navigation ---
 st.sidebar.title("App Navigation")
 selection = st.sidebar.radio("Go to:", [
     "Data load", 
     "Non‑Productive Inventory (NPI) Management", 
-    "Planning Overview — T&W Forecast Projection", 
-    "Planning Overview — BDD400 Closing Stock", 
-    "Storage Capacity Management", 
-    "Mitigation Proposal"
+    "Planning Overview", 
+    "Storage Capacity Management"
 ])
 
 # --- SECTION 1: Data Load ---
 if selection == "Data load":
     st.header("📂 Data Management")
-    st.info("Files uploaded here will override the default local files for this session.")
+    filenames = {
+        "Stock History": "StockHistory.xlsx",
+        "BDD400": "003BDD400.xlsx",
+        "Plant Capacity": "PlantCapacity.xlsx",
+        "T&W Forecasts": "TWforecasts.xlsx"
+    }
     
     cols = st.columns(2)
-    for i, (label, config) in enumerate(FILES_CONFIG.items()):
+    for i, (label, fname) in enumerate(filenames.items()):
         with cols[i % 2]:
             st.subheader(label)
-            # The 'key' ensures Streamlit tracks this specific uploader
-            uploaded_file = st.file_uploader(f"Upload {config['filename']}", type=["xlsx", "csv"], key=f"uploader_{label}")
+            up = st.file_uploader(f"Upload {fname}", type=["xlsx", "csv"], key=f"up_{label}")
             
-            # If user drags and drops, update session state immediately
-            if uploaded_file is not None:
-                new_df = load_file_content(uploaded_file)
-                if new_df is not None:
-                    st.session_state['data'][label] = new_df
-                    st.success(f"✅ Successfully uploaded {uploaded_file.name}")
+            # Check for upload or local file
+            if up is not None:
+                st.session_state['data'][label] = load_file_content(up)
+            elif st.session_state['data'][label] is None and os.path.exists(fname):
+                st.session_state['data'][label] = load_file_content(fname)
             
-            # Display status
             if st.session_state['data'][label] is not None:
-                st.caption(f"Status: Data loaded ({len(st.session_state['data'][label])} rows)")
+                st.success(f"✅ {label} Active ({len(st.session_state['data'][label])} rows)")
             else:
-                st.error(f"Status: Missing {config['filename']}")
+                st.warning(f"⚠️ {label} missing. Please upload.")
 
 # --- SECTION 2: NPI Management ---
 elif selection == "Non‑Productive Inventory (NPI) Management":
     st.header("📉 Non‑Productive Inventory (NPI) Management")
-    
-    df_stock = st.session_state['data'].get("Stock History")
-    
-    if df_stock is not None:
-        # Data Preparation
-        df_stock['DateStamp'] = pd.to_datetime(df_stock['DateStamp'])
-        all_categories = [
-            'PhysicalStock', 'OveragedTireQty', 'IntransitQty', 
-            'QualityInspectionQty', 'BlockedStockQty', 'ATPonHand'
-        ]
-        
-        # Ensure categories exist in data
-        existing_cats = [c for c in all_categories if c in df_stock.columns]
-        
-        # --- NEW: Latest Inventory Summary by Plant ---
-        st.subheader("📋 Latest Inventory Snapshot (All Categories)")
-        latest_date = df_stock['DateStamp'].max()
-        st.write(f"Showing data for the latest available date: **{latest_date.strftime('%Y-%m-%d')}**")
-        
-        df_latest = df_stock[df_stock['DateStamp'] == latest_date]
-        plant_summary = df_latest.groupby('PlantID')[existing_cats].sum().reset_index()
-        
-        # Adding a Total row for convenience
-        total_row = plant_summary[existing_cats].sum().to_frame().T
-        total_row['PlantID'] = 'TOTAL'
-        plant_summary = pd.concat([plant_summary, total_row], ignore_index=True)
-        
-        st.dataframe(plant_summary.style.format(precision=0).highlight_max(axis=0, color='#e6f3ff'), use_container_width=True)
-        
-        st.divider()
+    df = st.session_state['data'].get("Stock History")
 
-        # --- Analysis Tabs ---
-        tab1, tab2, tab3 = st.tabs(["📈 NPI Trends", "⏳ Accumulation Monitor", "📋 Bottleneck Materials"])
+    if df is not None:
+        # --- TOP SUMMARY ---
+        latest_date = df['DateStamp'].max()
+        st.subheader(f"📋 Global Plant Summary (As of {latest_date.strftime('%Y-%m-%d')})")
+        
+        df_latest = df[df['DateStamp'] == latest_date]
+        summary = df_latest.groupby('PlantID')[ALL_STOCK_COLUMNS].sum().reset_index()
+        st.dataframe(summary.style.format(precision=0).highlight_max(axis=0), use_container_width=True)
+
+        # --- TABS ---
+        tab1, tab2, tab3 = st.tabs(["🔍 Material Drilldown", "⏳ Accumulation Monitor", "📈 Trend Analysis"])
 
         with tab1:
-            # Filters for the trend chart
-            selected_wh = st.multiselect("Filter Chart by Warehouse", options=sorted(df_stock['PlantID'].unique()), default=df_stock['PlantID'].unique())
-            df_trend_filt = df_stock[df_stock['PlantID'].isin(selected_wh)]
+            st.subheader("Inventory by Material")
+            col_a, col_b = st.columns([1, 2])
+            with col_a:
+                selected_plant = st.selectbox("Select Plant", options=sorted(df['PlantID'].unique()))
+                sort_by = st.selectbox("Sort By", options=NPI_COLUMNS, index=0)
             
-            npi_vars = ['BlockedStockQty', 'QualityInspectionQty', 'OveragedTireQty']
-            df_trend = df_trend_filt.groupby('DateStamp')[npi_vars].sum().reset_index()
-            st.line_chart(df_trend, x='DateStamp', y=npi_vars)
+            # Filter latest data for selected plant
+            mat_data = df_latest[df_latest['PlantID'] == selected_plant]
+            mat_display = mat_data.groupby('MaterialDescription')[NPI_COLUMNS + ['PhysicalStock']].sum().reset_index()
+            mat_display = mat_display.sort_values(by=sort_by, ascending=False)
+            
+            st.write(f"Showing materials in **{selected_plant}** sorted by **{sort_by}**:")
+            st.dataframe(mat_display, use_container_width=True)
 
         with tab2:
-            st.subheader("Time Since Last Zero")
-            # Reuse your accumulation logic here...
-            st.info("This section calculates how long NPI has been building up without clearing.")
-            # (Calculation logic from previous version goes here, using df_stock)
+            st.subheader("Time Since Last Zero (Accumulation)")
+            st.info("Tracking how many days NPI has been non-zero.")
+            
+            # Optimization: Only calculate for materials that currently have NPI > 0
+            current_npi_mask = (df_latest[NPI_COLUMNS].sum(axis=1) > 0)
+            target_skus = df_latest[current_npi_mask][['SapCode', 'PlantID', 'MaterialDescription']].drop_duplicates()
+
+            acc_list = []
+            if not target_skus.empty:
+                for _, row in target_skus.iterrows():
+                    # Get history for this specific SKU/Plant
+                    hist = df[(df['SapCode'] == row['SapCode']) & (df['PlantID'] == row['PlantID'])].sort_values('DateStamp')
+                    res = {'Material': row['MaterialDescription'], 'Plant': row['PlantID']}
+                    
+                    for col in NPI_COLUMNS:
+                        curr_qty = hist[hist['DateStamp'] == latest_date][col].sum()
+                        if curr_qty > 0:
+                            # Find last zero date
+                            zeros = hist[hist[col] == 0]
+                            last_zero = zeros['DateStamp'].max() if not zeros.empty else hist['DateStamp'].min()
+                            res[f'{col} Age (Days)'] = (latest_date - last_zero).days
+                            res[f'{col} Qty'] = curr_qty
+                        else:
+                            res[f'{col} Age (Days)'] = 0
+                            res[f'{col} Qty'] = 0
+                    acc_list.append(res)
+                
+                df_acc = pd.DataFrame(acc_list)
+                st.dataframe(df_acc, use_container_width=True)
+            else:
+                st.write("No materials currently have Non-Productive Inventory.")
+
+        with tab3:
+            st.subheader("Evolution of NPI")
+            plant_filter = st.multiselect("Filter Trends by Plant", options=sorted(df['PlantID'].unique()), default=df['PlantID'].unique())
+            trend_df = df[df['PlantID'].isin(plant_filter)].groupby('DateStamp')[NPI_COLUMNS].sum().reset_index()
+            st.line_chart(trend_df, x='DateStamp', y=NPI_COLUMNS)
 
     else:
-        st.warning("Please upload 'Stock History' in the Data Load section to see the summary.")
+        st.error("No Stock History data found. Please go to the 'Data load' section.")
 
-# --- OTHER SECTIONS (Placeholders) ---
+# --- PLACEHOLDER ---
 else:
-    st.header(selection)
-    st.info("Logic for this section is pending.")
+    st.header("Section under construction")
