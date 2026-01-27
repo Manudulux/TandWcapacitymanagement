@@ -4,6 +4,34 @@ import os
 import re
 import duckdb
 
+PARQUET_DIR = "parquet_cache"
+
+os.makedirs(PARQUET_DIR, exist_ok=True)
+
+def parquet_path(label: str) -> str:
+    return os.path.join(PARQUET_DIR, f"{label.replace(' ', '_')}.parquet")
+
+
+def save_as_parquet(df: pd.DataFrame, label: str):
+    """Save DataFrame to Parquet for fast reload next session."""
+    try:
+        df.to_parquet(parquet_path(label), index=False)
+    except Exception as e:
+        st.warning(f"Failed to write Parquet for {label}: {e}")
+
+
+def load_parquet_if_exists(label: str):
+    """Load Parquet file if available."""
+    path = parquet_path(label)
+    if os.path.exists(path):
+        try:
+            return pd.read_parquet(path)
+        except Exception:
+            return None
+    return None
+
+
+
 # --- Page Configuration ---
 st.set_page_config(page_title="Supply Chain Planning Dashboard", layout="wide")
 
