@@ -64,14 +64,24 @@ def load_file_content(file_path_or_buffer, label):
             except:
                 df = pd.read_csv(file_path_or_buffer)
 
-        # BDD400 week conversion
-        if label == "BDD400" and "DateStamp" in df.columns:
-            df["DateStamp"] = df["DateStamp"].apply(parse_week_string)
-            df = df.dropna(subset=["DateStamp"])
-        # Generic DateStamp parsing
-        elif "DateStamp" in df.columns:
-            df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
-            df = df.dropna(subset=["DateStamp"])
+        # === Date column handling per dataset ===
+        if label == "BDD400":
+            # BDD400 week conversion (keeps column name DateStamp)
+            if "DateStamp" in df.columns:
+                df["DateStamp"] = df["DateStamp"].apply(parse_week_string)
+                df = df.dropna(subset=["DateStamp"])
+        elif label == "Stock History":
+            # Period→DateStamp (Stock History only)
+            if "Period" in df.columns and "DateStamp" not in df.columns:
+                df = df.rename(columns={"Period": "DateStamp"})
+            if "DateStamp" in df.columns:
+                df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
+                df = df.dropna(subset=["DateStamp"])
+        else:
+            # Generic DateStamp parsing for other files (if they have DateStamp)
+            if "DateStamp" in df.columns:
+                df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
+                df = df.dropna(subset=["DateStamp"])
 
         return df
     except Exception as e:
@@ -219,6 +229,15 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
         st.error("Please upload Stock History first.")
         st.stop()
 
+    # Period→DateStamp (Stock History only) — safety in case old parquet is cached
+    if "Period" in df.columns and "DateStamp" not in df.columns:
+        df = df.rename(columns={"Period": "DateStamp"})
+        try:
+            df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
+            df = df.dropna(subset=["DateStamp"])
+        except Exception:
+            pass
+
     # Compute fresh NPI metrics
     df_aug = compute_npi_days_duckdb(df, NPI_COLUMNS)
     latest_date = df_aug["DateStamp"].max()
@@ -359,7 +378,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
 
         # Columns to show (deduplicated)
         base_cols = ["DateStamp", "PlantID", "SapCode", "MaterialDescription"]
-        # FIX: deduplicate columns while preserving order
         combined = base_cols + ALL_STOCK_COLUMNS + NPI_COLUMNS
         seen = set()
         cols_to_show = [c for c in combined if not (c in seen or seen.add(c))]
@@ -367,7 +385,7 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
         cols_existing = [c for c in cols_to_show if c in df.columns]
         out = df.loc[mask, cols_existing].sort_values(["DateStamp", "PlantID", "SapCode"])
 
-        # FIX: drop duplicate columns before display (safety net)
+        # safety net: drop duplicate columns before display
         out = out.loc[:, ~out.columns.duplicated(keep="first")]
 
         st.dataframe(out, use_container_width=True, height=480)
@@ -558,6 +576,5 @@ elif selection == "Storage Capacity Management":
 else:
     st.header(selection)
     st.info("Implementation pending.")
-
 
 
