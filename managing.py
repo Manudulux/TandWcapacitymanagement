@@ -151,7 +151,6 @@ def get_future_weeks_18(df_bdd: pd.DataFrame) -> list[pd.Timestamp]:
     today = pd.Timestamp.today().normalize()
     weeks = sorted(pd.to_datetime(df_bdd["DateStamp"].unique()))
     future_weeks = [w for w in weeks if w >= today]
-    # If fewer than 18 future weeks are available, return what's there.
     return future_weeks[:18]
 
 def ensure_columns_exist(df: pd.DataFrame, cols: list[str], label: str) -> bool:
@@ -205,7 +204,6 @@ if selection == "Data load":
                     if df_loaded is not None:
                         st.session_state["data"][label] = df_loaded
                         save_as_parquet(df_loaded, label)
-                    # else: keep None
 
             # Status badge
             if st.session_state["data"][label] is not None:
@@ -278,7 +276,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
     # --- TAB 2 ---
     with tab2:
         st.subheader("Time Since Last Zero (All Categories)")
-        # Reuse from tab1 scope if exists, else compute for all latest
         if 'mat_display' not in locals():
             mat = df_latest
             agg_dict = {
@@ -360,13 +357,18 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
             end_dt = pd.to_datetime(date_range[1]) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
             mask &= (df["DateStamp"] >= start_dt) & (df["DateStamp"] <= end_dt)
 
-        cols_to_show = (
-            ["DateStamp", "PlantID", "SapCode", "MaterialDescription"]
-            + ALL_STOCK_COLUMNS
-            + NPI_COLUMNS
-        )
+        # Columns to show (deduplicated)
+        base_cols = ["DateStamp", "PlantID", "SapCode", "MaterialDescription"]
+        # FIX: deduplicate columns while preserving order
+        combined = base_cols + ALL_STOCK_COLUMNS + NPI_COLUMNS
+        seen = set()
+        cols_to_show = [c for c in combined if not (c in seen or seen.add(c))]
+
         cols_existing = [c for c in cols_to_show if c in df.columns]
         out = df.loc[mask, cols_existing].sort_values(["DateStamp", "PlantID", "SapCode"])
+
+        # FIX: drop duplicate columns before display (safety net)
+        out = out.loc[:, ~out.columns.duplicated(keep="first")]
 
         st.dataframe(out, use_container_width=True, height=480)
         st.download_button(
@@ -464,7 +466,6 @@ elif selection == "Storage Capacity Management":
     # Capacity alignment:
     # If capacity has DateStamp, use week-specific; else cross-join week list to plant capacities
     if "DateStamp" in df_cap.columns:
-        # Use the latest entry per PlantID/week if duplicates
         df_cap_tmp = df_cap.copy()
         df_cap_tmp["DateStamp"] = pd.to_datetime(df_cap_tmp["DateStamp"])
         df_cap_week = (
@@ -472,7 +473,6 @@ elif selection == "Storage Capacity Management":
             .drop_duplicates(subset=["DateStamp", "PlantID"], keep="last")
         )
     else:
-        # Static capacity per plant; create weekly view
         weeks_df = pd.DataFrame({"DateStamp": pd.to_datetime(future_weeks)})
         cap_unique = df_cap[["PlantID", "MaxCapacity"]].drop_duplicates()
         weeks_df["key"] = 1
@@ -481,14 +481,13 @@ elif selection == "Storage Capacity Management":
 
     # Merge ClosingInventory with capacities
     df_merge = df_ci.merge(df_cap_week, on=["DateStamp", "PlantID"], how="left")
-    # any plants without capacity → warn once
+
     missing_cap_plants = sorted(df_merge[df_merge["MaxCapacity"].isna()]["PlantID"].unique().tolist())
     if missing_cap_plants:
         st.warning(f"No capacity found for plant(s): {missing_cap_plants}. Treating as 0 capacity for calculation.")
 
     df_merge["MaxCapacity"] = pd.to_numeric(df_merge["MaxCapacity"], errors="coerce").fillna(0)
     df_merge["Delta"] = df_merge["ClosingInventory"] - df_merge["MaxCapacity"]
-    # Ratio for coloring; avoid division by zero
     df_merge["Ratio"] = df_merge.apply(
         lambda r: (r["ClosingInventory"] / r["MaxCapacity"]) if r["MaxCapacity"] else pd.NA,
         axis=1
@@ -545,7 +544,6 @@ elif selection == "Storage Capacity Management":
     )
     st.dataframe(styled_delta, use_container_width=True)
 
-    # Show weekly totals table for quick scan
     st.subheader("Weekly Total Inventory vs Capacity")
     totals_display = weekly_totals.set_index("DateStamp").rename(columns={
         "ClosingInventory": "TotalClosingInventory",
@@ -558,11 +556,8 @@ elif selection == "Storage Capacity Management":
     )
 
 else:
-    # Fallback (should not hit because all menu items are handled)
     st.header(selection)
     st.info("Implementation pending.")
-
-
 
 
 
