@@ -80,27 +80,21 @@ def normalize_columns(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
     """
     def clean_one(col: str) -> str:
         c = str(col).strip()
-        # remove leading/trailing square brackets if present: [ColName] -> ColName
         if len(c) >= 2 and c[0] == '[' and c[-1] == ']':
             c = c[1:-1]
         c = c.strip()
-        # replace runs of whitespace with single space
         c = re.sub(r'\s+', ' ', c)
-        # replace spaces with underscore
         c = c.replace(' ', '_')
-        # collapse multiple underscores
         c = re.sub(r'_+', '_', c)
         return c
 
-    # First pass: strip brackets and clean separators
     new_cols = [clean_one(c) for c in df.columns]
 
-    # Build alias map (lowercase keys) to canonical names
-    # NOTE: Only include aliases that may vary; generic clean handles []/spaces
     alias_map = {
         # dates
-        'period': 'DateStamp',         # Stock History specific
+        'period': 'DateStamp',
         'datestamp': 'DateStamp',
+
         # ids / descriptors
         'sapcode': 'SapCode',
         'plantid': 'PlantID',
@@ -110,16 +104,20 @@ def normalize_columns(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
         'season': 'Season',
         'ab': 'AB',
 
-        # stock metrics
+        # stock metrics (used across datasets)
         'physicalstock': 'PhysicalStock',
-        'overagedtireqty': 'OveragedTireQty',   # normalize both "OverAged..." and "Overaged..."
-        'overagedtireqty': 'OveragedTireQty',
+        'overagedtireqty': 'OveragedTireQty',  # normalize variants/casing
         'intransitqty': 'IntransitQty',
         'qualityinspectionqty': 'QualityInspectionQty',
         'blockedstockqty': 'BlockedStockQty',
         'atponhand': 'ATPonHand',
 
-        # sometimes users include week/year fields; we keep them but don't rely on them
+        # BDD400 planning metrics
+        'closinginventory': 'ClosingInventory',
+        'inboundconfirmedpr': 'InboundConfirmedPR',
+        'daysofcoverage': 'DaysOfCoverage',
+
+        # optional helpers
         'period_year': 'Period_Year',
         'period__week': 'Period__Week',
         'period_week': 'Period__Week',
@@ -129,14 +127,14 @@ def normalize_columns(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
         key = col.lower()
         if key in alias_map:
             return alias_map[key]
-        # If not explicitly mapped, try to match "overaged" variants
-        if key in ('overagedtireqty', 'overagedtireqty', 'overaged_tire_qty', 'overagedtire_qty', 'overagedtyreqty', 'overaged_tireqty', 'overagedtireqty'):
+        # Extra guard for weird "OverAged" variants
+        if key in ('overagedtireqty', 'overaged_tire_qty', 'overagedtire_qty', 'overagedtyreqty', 'overaged_tireqty', 'overagedtireqty'):
             return 'OveragedTireQty'
         return col
 
     canon_cols = [canonicalize(c) for c in new_cols]
 
-    # De-duplicate while preserving order by appending suffixes if necessary
+    # De-duplicate while preserving order by appending suffix if necessary
     seen = {}
     final_cols = []
     for c in canon_cols:
@@ -145,7 +143,7 @@ def normalize_columns(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
             final_cols.append(c)
         else:
             seen[c] += 1
-            final_cols.append(f"{c}__{seen[c]}")  # avoid duplicate columns silently
+            final_cols.append(f"{c}__{seen[c]}")
 
     df.columns = final_cols
     return df
@@ -166,8 +164,8 @@ def load_file_content(file_path_or_buffer, label):
             except:
                 df = pd.read_csv(file_path_or_buffer)
 
-        # Normalize columns early for Stock History (handles [brackets], casing, aliases)
-        if label == "Stock History":
+        # Normalize columns early (Stock History & BDD400)
+        if label in ("Stock History", "BDD400"):
             df = normalize_columns(df, dataset=label)
 
         # Initialize validation snapshot
@@ -184,26 +182,39 @@ def load_file_content(file_path_or_buffer, label):
 
         # === Dataset-specific handling ===
         if label == "BDD400":
-            # Required columns for planning pages
+            # Required for planning & mitigation
             required = ["DateStamp", "PlantID", "ClosingInventory"]
             missing_req = [c for c in required if c not in df.columns]
             if missing_req:
                 detail["required_ok"] = False
                 detail["missing_required"] = missing_req
 
-            # BDD400 week conversion (keeps column name DateStamp)
+            # Expected (soft) for mitigation proposal
+            expected_soft = ["SapCode", "MaterialDescription", "InboundConfirmedPR", "DaysOfCoverage", "ATPonHand"]
+            missing_soft = [c for c in expected_soft if c not in df.columns]
+            detail["missing_expected"] = missing_soft
+
+            # Convert week format, if needed
             if "DateStamp" in df.columns:
-                df["DateStamp"] = df["DateStamp"].apply(parse_week_string)
+                # Try parsing W YYYY/ww strings; if already datetime, coerce will keep
+                def _maybe_week_to_dt(x):
+                    dt = parse_week_string(x)
+                    return pd.to_datetime(dt, errors="coerce")
+                df["DateStamp"] = df["DateStamp"].apply(_maybe_week_to_dt)
                 df = df.dropna(subset=["DateStamp"])
-            # Basic stats
+
+            # Cast relevant numerics
+            for c in ["ClosingInventory", "InboundConfirmedPR", "DaysOfCoverage", "ATPonHand"]:
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+
             stats = _compute_basic_stats(df, "DateStamp")
             detail.update({k: v for k, v in stats.items() if k in ["rows", "date_min", "date_max"]})
             _record_validation(label, detail)
 
         elif label == "Stock History":
-            # Required (flex): DateStamp/Period + PlantID + SapCode
             has_ds = "DateStamp" in df.columns
-            has_period = "Period" in df.columns  # after normalization, this might remain if user provided both
+            has_period = "Period" in df.columns
             missing_req = []
             if not (has_ds or has_period):
                 missing_req.append("DateStamp_or_Period")
@@ -216,28 +227,23 @@ def load_file_content(file_path_or_buffer, label):
                 detail["required_ok"] = False
                 detail["missing_required"] = missing_req
 
-            # Capture expected (soft) before we auto-create
             missing_expected = [c for c in (NPI_COLUMNS + ALL_STOCK_COLUMNS) if c not in df.columns]
             detail["missing_expected"] = missing_expected.copy()
 
-            # If we still have Period but not DateStamp, upgrade it
             if "Period" in df.columns and "DateStamp" not in df.columns:
                 df = df.rename(columns={"Period": "DateStamp"})
                 has_ds = True
                 detail["notes"].append("Renamed 'Period' → 'DateStamp'")
 
-            # Date parsing & drop invalid
             if has_ds:
                 df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
                 df = df.dropna(subset=["DateStamp"])
 
-            # Ensure soft-id columns exist (if truly missing)
             if "PlantID" not in df.columns:
                 df["PlantID"] = "UNKNOWN"
             if "SapCode" not in df.columns:
                 df["SapCode"] = "UNKNOWN"
 
-            # Auto-create missing NPI/STOCK as zeros (and remember them)
             auto_created = []
             for c in NPI_COLUMNS:
                 if c not in df.columns:
@@ -255,20 +261,17 @@ def load_file_content(file_path_or_buffer, label):
                 if detail["required_ok"] and auto_created:
                     detail["notes"].append("Some expected columns were missing and were auto‑created with value 0.")
 
-            # Basic stats
             stats = _compute_basic_stats(df, "DateStamp")
             detail.update({k: v for k, v in stats.items() if k in ["rows", "date_min", "date_max"]})
             _record_validation(label, detail)
 
         elif label == "Plant Capacity":
-            # Required for capacity page
             required = ["PlantID", "MaxCapacity"]
             missing_req = [c for c in required if c not in df.columns]
             if missing_req:
                 detail["required_ok"] = False
                 detail["missing_required"] = missing_req
 
-            # Optional DateStamp for week-specific capacity
             if "DateStamp" in df.columns:
                 try:
                     df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
@@ -281,7 +284,6 @@ def load_file_content(file_path_or_buffer, label):
             _record_validation(label, detail)
 
         else:
-            # T&W Forecasts: no strict schema enforced yet
             stats = _compute_basic_stats(df, "DateStamp" if "DateStamp" in df.columns else None)
             detail.update({k: v for k, v in stats.items() if k in ["rows", "date_min", "date_max"]})
             detail["notes"].append("No strict validation rules configured for this dataset yet.")
@@ -307,16 +309,12 @@ _ensure_validation_state()
 def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.DataFrame:
     df2 = df.copy()
 
-    # Defensive — create any missing NPI columns as zeros
     for c in npi_categories:
         if c not in df2.columns:
             df2[c] = 0
-
-    # Ensure numeric cols
     for c in npi_categories:
         df2[c] = pd.to_numeric(df2[c], errors="coerce").fillna(0)
 
-    # Ensure base IDs exist for window partitions (soft defaults)
     if "SapCode" not in df2.columns:
         df2["SapCode"] = "UNKNOWN"
     if "PlantID" not in df2.columns:
@@ -367,7 +365,8 @@ selection = st.sidebar.radio(
         "Data load",
         "Non‑Productive Inventory (NPI) Management",
         "Planning Overview",
-        "Storage Capacity Management"
+        "Storage Capacity Management",
+        "Mitigation Proposal"
     ]
 )
 
@@ -394,7 +393,6 @@ def render_validation_panel():
     v = _ensure_validation_state()
     datasets = ["Stock History", "BDD400", "Plant Capacity", "T&W Forecasts"]
 
-    # Overall readiness badges
     npi_ready = v.get("Stock History", {}).get("required_ok", False)
     plan_ready = v.get("BDD400", {}).get("required_ok", False)
     cap_ready = v.get("Plant Capacity", {}).get("required_ok", False)
@@ -482,22 +480,25 @@ if selection == "Data load":
                 # Try Parquet (fast path)
                 df_parquet = load_parquet_if_exists(label)
                 if df_parquet is not None:
-                    # Normalize columns for Stock History if cached is old format with brackets
-                    if label == "Stock History":
+                    # Normalize cached data if needed
+                    if label in ("Stock History", "BDD400"):
                         df_parquet = normalize_columns(df_parquet, dataset=label)
                     st.session_state["data"][label] = df_parquet
                     # Validation snapshot for cached data
                     df_tmp = df_parquet
                     if label == "BDD400":
                         required = ["DateStamp", "PlantID", "ClosingInventory"]
+                        missing_req = [c for c in required if c not in df_tmp.columns]
+                        expected_soft = ["SapCode", "MaterialDescription", "InboundConfirmedPR", "DaysOfCoverage", "ATPonHand"]
+                        missing_soft = [c for c in expected_soft if c not in df_tmp.columns]
                         detail = {
                             "rows": int(len(df_tmp)),
-                            "required_ok": all(c in df_tmp.columns for c in required),
-                            "missing_required": [c for c in required if c not in df_tmp.columns],
-                            "missing_expected": [],
+                            "required_ok": len(missing_req) == 0,
+                            "missing_required": missing_req,
+                            "missing_expected": missing_soft,
                             "auto_created": [],
-                            "date_min": _compute_basic_stats(df_tmp, "DateStamp")["date_min"],
-                            "date_max": _compute_basic_stats(df_tmp, "DateStamp")["date_max"],
+                            "date_min": _compute_basic_stats(df_tmp, "DateStamp")["date_min"] if "DateStamp" in df_tmp.columns else None,
+                            "date_max": _compute_basic_stats(df_tmp, "DateStamp")["date_max"] if "DateStamp" in df_tmp.columns else None,
                             "notes": ["Loaded from cache (Parquet)"]
                         }
                         _record_validation(label, detail)
@@ -576,26 +577,21 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
         st.error("Please upload Stock History first.")
         st.stop()
 
-    # If cached df came without normalization (legacy), normalize here as well
     df = normalize_columns(df, dataset="Stock History")
 
-    # Period→DateStamp safety
     if "Period" in df.columns and "DateStamp" not in df.columns:
         df = df.rename(columns={"Period": "DateStamp"})
     if "DateStamp" not in df.columns:
         st.error("Stock History is missing the 'DateStamp' (Period) column.")
         st.stop()
 
-    # Normalize datetime
     df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
     df = df.dropna(subset=["DateStamp"])
 
-    # Ensure base ID columns exist (hard requirement for NPI logic)
     if "PlantID" not in df.columns or "SapCode" not in df.columns:
         st.error("Stock History must include 'PlantID' and 'SapCode' columns.")
         st.stop()
 
-    # Ensure NPI & stock columns exist at runtime (double safety + numeric)
     missing_npi, missing_stock = [], []
     for c in NPI_COLUMNS:
         if c not in df.columns:
@@ -614,18 +610,15 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
             f"NPI: {missing_npi or 'none'}, Stock: {missing_stock or 'none'}"
         )
 
-    # Compute fresh NPI metrics
     df_aug = compute_npi_days_duckdb(df, NPI_COLUMNS)
     latest_date = df_aug["DateStamp"].max()
     df_latest = df_aug[df_aug["DateStamp"] == latest_date]
 
-    # --- TOP SUMMARY (defensive against missing columns) ---
     st.subheader(f"📋 Global Plant Summary (As of {latest_date:%Y-%m-%d})")
     available_cols = [c for c in ALL_STOCK_COLUMNS if c in df_latest.columns]
     if not available_cols:
         st.info("No stock columns available to summarize for the latest date.")
     else:
-        # Ensure numeric for safety
         df_latest[available_cols] = df_latest[available_cols].apply(
             pd.to_numeric, errors="coerce"
         ).fillna(0)
@@ -636,7 +629,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
         )
         st.dataframe(summary, use_container_width=True)
 
-    # --- Tabs ---
     tab1, tab2, tab3, tab4 = st.tabs([
         "🔍 Material Drilldown",
         "⏳ Accumulation Monitor",
@@ -644,7 +636,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
         "🔎 Inventory Search"
     ])
 
-    # --- TAB 1 ---
     with tab1:
         st.subheader("Inventory by Material with Accumulation Days")
         colA, colB = st.columns([2, 1])
@@ -676,7 +667,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
             use_container_width=True
         )
 
-    # --- TAB 2 ---
     with tab2:
         st.subheader("Time Since Last Zero (All Categories)")
         if 'mat_display' not in locals():
@@ -692,7 +682,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
             )
         st.dataframe(mat_display, use_container_width=True)
 
-    # --- TAB 3 ---
     with tab3:
         st.subheader("Evolution of NPI")
         all_plants_trend = sorted(df["PlantID"].unique())
@@ -713,7 +702,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
         else:
             st.line_chart(trend, x="DateStamp", y=NPI_COLUMNS, use_container_width=True)
 
-    # --- TAB 4 (NEW): Inventory Search ---
     with tab4:
         st.subheader("Search Inventory Records (by Plant & SAP Code)")
         left, right = st.columns([2, 2])
@@ -726,7 +714,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
                 default=plants_all
             )
 
-            # date range filter
             min_d = pd.to_datetime(df["DateStamp"].min()).date()
             max_d = pd.to_datetime(df["DateStamp"].max()).date()
             date_range = st.date_input(
@@ -737,7 +724,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
                 help="Filter records within the selected date range"
             )
 
-        # derive SAP list after plant filter (for convenience)
         df_plant = df[df["PlantID"].isin(plants_sel)] if plants_sel else df.copy()
         with right:
             saps_all = sorted(df_plant["SapCode"].dropna().astype(str).unique())
@@ -747,20 +733,17 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
                 placeholder="Type to search SAP codes..."
             )
 
-        # Build filter
         mask = pd.Series(True, index=df.index)
         if plants_sel:
             mask &= df["PlantID"].isin(plants_sel)
         if saps_sel:
             mask &= df["SapCode"].astype(str).isin(saps_sel)
 
-        # Date filter
         if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
             start_dt = pd.to_datetime(date_range[0])
             end_dt = pd.to_datetime(date_range[1]) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
             mask &= (df["DateStamp"] >= start_dt) & (df["DateStamp"] <= end_dt)
 
-        # Columns to show (deduplicated)
         base_cols = ["DateStamp", "PlantID", "SapCode", "MaterialDescription"]
         combined = base_cols + ALL_STOCK_COLUMNS + NPI_COLUMNS
         seen = set()
@@ -768,8 +751,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
 
         cols_existing = [c for c in cols_to_show if c in df.columns]
         out = df.loc[mask, cols_existing].sort_values(["DateStamp", "PlantID", "SapCode"])
-
-        # safety net: drop duplicate columns before display
         out = out.loc[:, ~out.columns.duplicated(keep="first")]
 
         st.dataframe(out, use_container_width=True, height=480)
@@ -789,39 +770,37 @@ elif selection == "Planning Overview":
         st.error("Please upload BDD400 first.")
         st.stop()
 
+    # Normalize BDD400 (covers brackets/casing if any)
+    df_bdd = normalize_columns(df_bdd, dataset="BDD400")
+
     if not ensure_columns_exist(df_bdd, ["DateStamp", "PlantID", "ClosingInventory"], "BDD400"):
         st.stop()
 
-    # Determine next 18 weeks available in BDD400
     future_weeks = get_future_weeks_18(df_bdd)
     if not future_weeks:
         st.warning("No future weeks found in BDD400. Showing the most recent available weeks.")
-        # Fallback: last 18 available weeks
         all_weeks = sorted(pd.to_datetime(df_bdd["DateStamp"].unique()))
         future_weeks = all_weeks[-18:]
 
-    # Filter to the next 18 weeks only
     df18 = df_bdd[df_bdd["DateStamp"].isin(future_weeks)]
     plants_all = sorted(df18["PlantID"].unique())
-
     plants_sel = st.multiselect(
         "Filter plants",
         options=plants_all,
         default=plants_all
     )
-
     df18 = df18[df18["PlantID"].isin(plants_sel)] if plants_sel else df18.copy()
 
-    # Aggregate by week, plant
+    # Aggregate by week & plant
     closing = (
         df18.groupby(["DateStamp", "PlantID"])["ClosingInventory"]
         .sum()
         .reset_index()
     )
 
-    # Pivot for display
+    # Switched orientation: rows = PlantID, columns = DateStamp
     pivot_ci = (
-        closing.pivot(index="DateStamp", columns="PlantID", values="ClosingInventory")
+        closing.pivot(index="PlantID", columns="DateStamp", values="ClosingInventory")
         .sort_index()
         .fillna(0)
     )
@@ -829,7 +808,9 @@ elif selection == "Planning Overview":
     st.subheader("Closing Inventory by Plant (Next 18 Weeks)")
     st.dataframe(pivot_ci, use_container_width=True)
 
-    st.line_chart(pivot_ci, use_container_width=True)
+    # Optional chart (transpose to plot weeks on x-axis)
+    with st.expander("📊 Show chart for the table above (optional)"):
+        st.bar_chart(pivot_ci.T, use_container_width=True)
 
 # --- STORAGE CAPACITY MANAGEMENT ---
 elif selection == "Storage Capacity Management":
@@ -845,19 +826,20 @@ elif selection == "Storage Capacity Management":
         st.error("Please upload Plant Capacity first.")
         st.stop()
 
+    # Normalize BDD400 (covers brackets/casing if any)
+    df_bdd = normalize_columns(df_bdd, dataset="BDD400")
+
     if not ensure_columns_exist(df_bdd, ["DateStamp", "PlantID", "ClosingInventory"], "BDD400"):
         st.stop()
     if not ensure_columns_exist(df_cap, ["PlantID", "MaxCapacity"], "Plant Capacity"):
         st.stop()
 
-    # Weeks: same "next 18 weeks" logic
     future_weeks = get_future_weeks_18(df_bdd)
     if not future_weeks:
         st.warning("No future weeks found in BDD400. Showing the most recent available weeks.")
         all_weeks = sorted(pd.to_datetime(df_bdd["DateStamp"].unique()))
         future_weeks = all_weeks[-18:]
 
-    # Closing inventory by plant/week
     df_ci = (
         df_bdd[df_bdd["DateStamp"].isin(future_weeks)]
         .groupby(["DateStamp", "PlantID"])["ClosingInventory"]
@@ -865,8 +847,6 @@ elif selection == "Storage Capacity Management":
         .reset_index()
     )
 
-    # Capacity alignment:
-    # If capacity has DateStamp, use week-specific; else cross-join week list to plant capacities
     if "DateStamp" in df_cap.columns:
         df_cap_tmp = df_cap.copy()
         df_cap_tmp["DateStamp"] = pd.to_datetime(df_cap_tmp["DateStamp"])
@@ -881,7 +861,6 @@ elif selection == "Storage Capacity Management":
         cap_unique["key"] = 1
         df_cap_week = weeks_df.merge(cap_unique, on="key").drop(columns="key")
 
-    # Merge ClosingInventory with capacities
     df_merge = df_ci.merge(df_cap_week, on=["DateStamp", "PlantID"], how="left")
 
     missing_cap_plants = sorted(df_merge[df_merge["MaxCapacity"].isna()]["PlantID"].unique().tolist())
@@ -895,7 +874,7 @@ elif selection == "Storage Capacity Management":
         axis=1
     )
 
-    # Weekly totals (for TOTAL per week)
+    # Weekly totals (base, all plants)
     weekly_totals = (
         df_merge.groupby("DateStamp")[["ClosingInventory", "MaxCapacity"]]
         .sum()
@@ -906,7 +885,7 @@ elif selection == "Storage Capacity Management":
         lambda r: (r["ClosingInventory"] / r["MaxCapacity"]) if r["MaxCapacity"] else pd.NA, axis=1
     )
 
-    # --- Swapped orientation: rows = PlantID, columns = DateStamp ---
+    # Swapped orientation: rows = PlantID, columns = DateStamp
     st.subheader("Δ to Capacity by Plant & Week")
     st.caption(
         "Orientation: **rows = PlantID**, **columns = DateStamp (weeks)**. "
@@ -914,7 +893,6 @@ elif selection == "Storage Capacity Management":
         "Δ = ClosingInventory − MaxCapacity. The last row **TOTAL** shows week-level aggregate."
     )
 
-    # Rebuild pivots with swapped axes
     delta_pivot = (
         df_merge.pivot(index="PlantID", columns="DateStamp", values="Delta")
         .sort_index()
@@ -925,11 +903,9 @@ elif selection == "Storage Capacity Management":
         .sort_index()
     )
 
-    # Append TOTAL row using weekly_totals (per week)
     weekly_delta_ser = weekly_totals.set_index("DateStamp")["Delta"]
     weekly_ratio_ser = weekly_totals.set_index("DateStamp")["Ratio"]
 
-    # Ensure all week columns exist before assignment
     for col in delta_pivot.columns:
         if col not in weekly_delta_ser.index:
             weekly_delta_ser.loc[col] = 0
@@ -937,11 +913,9 @@ elif selection == "Storage Capacity Management":
         if col not in weekly_ratio_ser.index:
             weekly_ratio_ser.loc[col] = pd.NA
 
-    # Add TOTAL row (aligned by DateStamp columns)
     delta_pivot.loc["TOTAL", :] = weekly_delta_ser.reindex(delta_pivot.columns).values
     ratio_pivot.loc["TOTAL", :] = weekly_ratio_ser.reindex(ratio_pivot.columns).values
 
-    # Coloring helper based on ratio thresholds (expects same shape/index/cols)
     def colorize_by_ratio(ratio_df: pd.DataFrame) -> pd.DataFrame:
         styles = pd.DataFrame('', index=ratio_df.index, columns=ratio_df.columns)
         for idx in ratio_df.index:
@@ -950,11 +924,11 @@ elif selection == "Storage Capacity Management":
                 if pd.isna(r):
                     styles.loc[idx, col] = ''
                 elif r > 1.05:
-                    styles.loc[idx, col] = 'background-color: #f8d7da;'  # light red
+                    styles.loc[idx, col] = 'background-color: #f8d7da;'
                 elif r >= 0.95:
-                    styles.loc[idx, col] = 'background-color: #fff3cd;'  # light yellow
+                    styles.loc[idx, col] = 'background-color: #fff3cd;'
                 else:
-                    styles.loc[idx, col] = 'background-color: #d4edda;'  # light green
+                    styles.loc[idx, col] = 'background-color: #d4edda;'
         return styles
 
     styled_delta = (
@@ -964,22 +938,144 @@ elif selection == "Storage Capacity Management":
     )
     st.dataframe(styled_delta, use_container_width=True)
 
-    # Weekly totals panel (unchanged)
+    # NEW: Plant filter for weekly totals
     st.subheader("Weekly Total Inventory vs Capacity")
-    totals_display = weekly_totals.set_index("DateStamp").rename(columns={
+    total_plants_all = sorted(df_merge["PlantID"].unique())
+    selected_plants_for_totals = st.multiselect(
+        "Select plant(s) to include in totals",
+        options=total_plants_all,
+        default=total_plants_all,
+        help="Totals below will aggregate only the selected plants."
+    )
+
+    if selected_plants_for_totals:
+        df_merge_sel = df_merge[df_merge["PlantID"].isin(selected_plants_for_totals)]
+    else:
+        df_merge_sel = df_merge[df_merge["PlantID"].isin([])]
+
+    weekly_totals_sel = (
+        df_merge_sel.groupby("DateStamp")[["ClosingInventory", "MaxCapacity"]]
+        .sum()
+        .reset_index()
+    )
+    weekly_totals_sel["Delta"] = weekly_totals_sel["ClosingInventory"] - weekly_totals_sel["MaxCapacity"]
+    weekly_totals_sel["Ratio"] = weekly_totals_sel.apply(
+        lambda r: (r["ClosingInventory"] / r["MaxCapacity"]) if r["MaxCapacity"] else pd.NA, axis=1
+    )
+
+    totals_display = weekly_totals_sel.set_index("DateStamp").rename(columns={
         "ClosingInventory": "TotalClosingInventory",
         "MaxCapacity": "TotalCapacity"
     })
     st.dataframe(
         totals_display[["TotalClosingInventory", "TotalCapacity", "Delta", "Ratio"]]
-        .style.format({"TotalClosingInventory":"{:,.0f}", "TotalCapacity":"{:,.0f}", "Delta":"{:,.0f}", "Ratio":"{:,.2f}"}),
+        .style.format({
+            "TotalClosingInventory":"{:,.0f}",
+            "TotalCapacity":"{:,.0f}",
+            "Delta":"{:,.0f}",
+            "Ratio":"{:,.2f}"
+        }),
         use_container_width=True
+    )
+
+# --- MITIGATION PROPOSAL ---
+elif selection == "Mitigation Proposal":
+    st.header("🧯 Mitigation Proposal")
+
+    df_bdd = st.session_state["data"].get("BDD400")
+    if df_bdd is None:
+        st.error("Please upload BDD400 first.")
+        st.stop()
+
+    # Normalize BDD400 to handle brackets/casing/aliases
+    df_bdd = normalize_columns(df_bdd, dataset="BDD400")
+
+    # Ensure required columns
+    needed = ["DateStamp", "PlantID", "SapCode", "MaterialDescription",
+              "InboundConfirmedPR", "DaysOfCoverage", "ATPonHand"]
+    if not ensure_columns_exist(df_bdd, needed, "BDD400"):
+        st.stop()
+
+    # Parse dates just in case
+    df_bdd["DateStamp"] = pd.to_datetime(df_bdd["DateStamp"], errors="coerce")
+    df_bdd = df_bdd.dropna(subset=["DateStamp"])
+
+    # UI Controls
+    plants = sorted(df_bdd["PlantID"].dropna().astype(str).unique())
+    col1, col2, col3 = st.columns([1,1,2])
+    with col1:
+        receiving_plant = st.selectbox("Receiving Plant", options=plants)
+    with col2:
+        shipping_plant = st.selectbox("Shipping Plant", options=[p for p in plants if p != receiving_plant])
+    with col3:
+        periods = sorted(df_bdd["DateStamp"].dropna().unique())
+        default_period = periods[-1] if len(periods) else None
+        period = st.selectbox("Period (week)", options=periods, index=(len(periods)-1 if len(periods) else 0), format_func=lambda d: pd.to_datetime(d).strftime("%Y-%m-%d"))
+
+    # Receiving plant: materials for selected period
+    recv_mask = (df_bdd["PlantID"].astype(str) == str(receiving_plant)) & (df_bdd["DateStamp"] == pd.to_datetime(period))
+    recv_df = df_bdd.loc[recv_mask, ["SapCode", "MaterialDescription", "InboundConfirmedPR"]].copy()
+
+    # If duplicates per SAP, sum PR to distribute
+    recv_agg = (
+        recv_df.groupby(["SapCode", "MaterialDescription"], as_index=False)["InboundConfirmedPR"]
+        .sum()
+    )
+
+    # Safety: numeric coerce
+    recv_agg["InboundConfirmedPR"] = pd.to_numeric(recv_agg["InboundConfirmedPR"], errors="coerce").fillna(0)
+
+    # Sort by InboundConfirmedPR descending
+    recv_sorted = recv_agg.sort_values("InboundConfirmedPR", ascending=False).reset_index(drop=True)
+
+    # Shipping plant: latest DaysOfCoverage & ATPonHand per Sap
+    ship_mask = (df_bdd["PlantID"].astype(str) == str(shipping_plant))
+    ship_df = df_bdd.loc[ship_mask, ["SapCode", "DateStamp", "DaysOfCoverage", "ATPonHand"]].copy()
+
+    # Get the most recent record per SapCode
+    # Sort by DateStamp descending and drop duplicates
+    ship_df = ship_df.sort_values(["SapCode", "DateStamp"], ascending=[True, False])
+    ship_latest = ship_df.drop_duplicates(subset=["SapCode"], keep="first").rename(
+        columns={
+            "DaysOfCoverage": "Ship_DaysOfCoverage",
+            "ATPonHand": "Ship_ATPonHand",
+            "DateStamp": "Ship_LastUpdate"
+        }
+    )
+
+    # Merge receiving list with shipping metrics
+    proposal = recv_sorted.merge(ship_latest, on="SapCode", how="left")
+
+    # Display
+    st.subheader("Recommended Material Transfers (by Receiving Plant Needs)")
+    st.caption(
+        "Materials for the selected **receiving plant** and **period**, sorted by **InboundConfirmedPR**. "
+        "The **shipping plant** columns show the most recent **DaysOfCoverage** and **ATPonHand** available."
+    )
+
+    # Format & show
+    display_cols = ["SapCode", "MaterialDescription", "InboundConfirmedPR", "Ship_DaysOfCoverage", "Ship_ATPonHand", "Ship_LastUpdate"]
+    # Ensure present
+    display_cols = [c for c in display_cols if c in proposal.columns]
+    st.dataframe(
+        proposal[display_cols]
+        .style.format({
+            "InboundConfirmedPR": "{:,.0f}",
+            "Ship_DaysOfCoverage": "{:,.1f}",
+            "Ship_ATPonHand": "{:,.0f}"
+        }),
+        use_container_width=True,
+        height=520
+    )
+
+    # Download
+    st.download_button(
+        "⬇️ Download mitigation proposal (CSV)",
+        data=proposal[display_cols].to_csv(index=False).encode("utf-8"),
+        file_name=f"mitigation_proposal_{receiving_plant}_from_{shipping_plant}_{pd.to_datetime(period).date()}.csv",
+        mime="text/csv"
     )
 
 else:
     st.header(selection)
     st.info("Implementation pending.")
-
-
-
-
