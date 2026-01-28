@@ -37,6 +37,28 @@ def load_parquet_if_exists(label: str):
             return None
     return None
 
+# --- Validation state helpers ---
+def _ensure_validation_state():
+    if "validation_detail" not in st.session_state:
+        st.session_state["validation_detail"] = {}
+    return st.session_state["validation_detail"]
+
+def _record_validation(label: str, detail: dict):
+    v = _ensure_validation_state()
+    v[label] = detail
+
+def _compute_basic_stats(df: pd.DataFrame, date_col: str = "DateStamp") -> dict:
+    stats = {"rows": int(len(df)), "date_min": None, "date_max": None}
+    if date_col in df.columns:
+        try:
+            dmin = pd.to_datetime(df[date_col]).min()
+            dmax = pd.to_datetime(df[date_col]).max()
+            if pd.notna(dmin): stats["date_min"] = dmin
+            if pd.notna(dmax): stats["date_max"] = dmax
+        except Exception:
+            pass
+    return stats
+
 # --- Week parsing for BDD400 ---
 def parse_week_string(week_str):
     try:
@@ -48,7 +70,7 @@ def parse_week_string(week_str):
         return None
     return week_str
 
-# --- Load Excel/CSV Files ---
+# --- Load Excel/CSV Files (with validation capture) ---
 def load_file_content(file_path_or_buffer, label):
     try:
         # Load raw
@@ -64,36 +86,125 @@ def load_file_content(file_path_or_buffer, label):
             except:
                 df = pd.read_csv(file_path_or_buffer)
 
-        # === Date column handling per dataset ===
+        # Initialize validation snapshot
+        detail = {
+            "rows": int(len(df)),
+            "required_ok": True,
+            "missing_required": [],
+            "missing_expected": [],
+            "auto_created": [],
+            "date_min": None,
+            "date_max": None,
+            "notes": []
+        }
+
+        # === Dataset-specific handling ===
         if label == "BDD400":
+            # Required columns for planning pages
+            required = ["DateStamp", "PlantID", "ClosingInventory"]
+            missing_req = [c for c in required if c not in df.columns]
+            if missing_req:
+                detail["required_ok"] = False
+                detail["missing_required"] = missing_req
+
             # BDD400 week conversion (keeps column name DateStamp)
             if "DateStamp" in df.columns:
                 df["DateStamp"] = df["DateStamp"].apply(parse_week_string)
                 df = df.dropna(subset=["DateStamp"])
+            # Basic stats
+            stats = _compute_basic_stats(df, "DateStamp")
+            detail.update({k: v for k, v in stats.items() if k in ["rows", "date_min", "date_max"]})
+            _record_validation(label, detail)
+
         elif label == "Stock History":
-            # Period→DateStamp (Stock History only)
-            if "Period" in df.columns and "DateStamp" not in df.columns:
+            # Required (flex): DateStamp/Period + PlantID + SapCode
+            has_ds = "DateStamp" in df.columns
+            has_period = "Period" in df.columns
+            missing_req = []
+            if not (has_ds or has_period):
+                missing_req.append("DateStamp_or_Period")
+            if "PlantID" not in df.columns:
+                missing_req.append("PlantID")
+            if "SapCode" not in df.columns:
+                missing_req.append("SapCode")
+
+            if missing_req:
+                detail["required_ok"] = False
+                detail["missing_required"] = missing_req
+
+            # Capture expected (soft) before we auto-create
+            missing_expected = [c for c in (NPI_COLUMNS + ALL_STOCK_COLUMNS) if c not in df.columns]
+            detail["missing_expected"] = missing_expected.copy()
+
+            # Period→DateStamp (rename)
+            if has_period and not has_ds:
                 df = df.rename(columns={"Period": "DateStamp"})
-            if "DateStamp" in df.columns:
+                has_ds = True
+                detail["notes"].append("Renamed 'Period' → 'DateStamp'")
+
+            # Date parsing & drop invalid
+            if has_ds:
                 df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
                 df = df.dropna(subset=["DateStamp"])
 
-            # NEW: Ensure NPI columns exist (create as zeros if missing)
+            # Ensure soft-id columns exist (if truly missing)
+            if "PlantID" not in df.columns:
+                df["PlantID"] = "UNKNOWN"
+            if "SapCode" not in df.columns:
+                df["SapCode"] = "UNKNOWN"
+
+            # Auto-create missing NPI/STOCK as zeros (and remember them)
+            auto_created = []
             for c in NPI_COLUMNS:
                 if c not in df.columns:
                     df[c] = 0
-            # Also ensure stock columns used in summary exist
+                    auto_created.append(c)
+                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
             for c in ALL_STOCK_COLUMNS:
                 if c not in df.columns:
                     df[c] = 0
+                    auto_created.append(c)
+                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+            if auto_created:
+                detail["auto_created"] = sorted(auto_created)
+                if detail["required_ok"] and auto_created:
+                    detail["notes"].append("Some expected columns were missing and were auto‑created with value 0.")
+
+            # Basic stats
+            stats = _compute_basic_stats(df, "DateStamp")
+            detail.update({k: v for k, v in stats.items() if k in ["rows", "date_min", "date_max"]})
+            _record_validation(label, detail)
+
+        elif label == "Plant Capacity":
+            # Required for capacity page
+            required = ["PlantID", "MaxCapacity"]
+            missing_req = [c for c in required if c not in df.columns]
+            if missing_req:
+                detail["required_ok"] = False
+                detail["missing_required"] = missing_req
+
+            # Optional DateStamp for week-specific capacity
+            if "DateStamp" in df.columns:
+                try:
+                    df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
+                except Exception:
+                    pass
+                stats = _compute_basic_stats(df, "DateStamp")
+            else:
+                stats = {"rows": int(len(df)), "date_min": None, "date_max": None}
+            detail.update({k: v for k, v in stats.items() if k in ["rows", "date_min", "date_max"]})
+            _record_validation(label, detail)
 
         else:
-            # Generic DateStamp parsing for other files (if they have DateStamp)
-            if "DateStamp" in df.columns:
-                df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
-                df = df.dropna(subset=["DateStamp"])
+            # T&W Forecasts: no strict schema enforced yet
+            stats = _compute_basic_stats(df, "DateStamp" if "DateStamp" in df.columns else None)
+            detail.update({k: v for k, v in stats.items() if k in ["rows", "date_min", "date_max"]})
+            detail["notes"].append("No strict validation rules configured for this dataset yet.")
+            _record_validation(label, detail)
 
         return df
+
     except Exception as e:
         st.error(f"Error loading {label}: {e}")
         return None
@@ -106,12 +217,13 @@ if "data" not in st.session_state:
         "Plant Capacity": None,
         "T&W Forecasts": None
     }
+_ensure_validation_state()
 
 # --- DuckDB NPI Computation (no caching!) ---
 def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.DataFrame:
     df2 = df.copy()
 
-    # NEW: Defensive — create any missing NPI columns as zeros
+    # Defensive — create any missing NPI columns as zeros
     for c in npi_categories:
         if c not in df2.columns:
             df2[c] = 0
@@ -119,6 +231,12 @@ def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.D
     # Ensure numeric cols
     for c in npi_categories:
         df2[c] = pd.to_numeric(df2[c], errors="coerce").fillna(0)
+
+    # Ensure base IDs exist for window partitions (soft defaults)
+    if "SapCode" not in df2.columns:
+        df2["SapCode"] = "UNKNOWN"
+    if "PlantID" not in df2.columns:
+        df2["PlantID"] = "UNKNOWN"
 
     con = duckdb.connect()
     con.register("stock", df2)
@@ -185,6 +303,68 @@ def ensure_columns_exist(df: pd.DataFrame, cols: list[str], label: str) -> bool:
         return False
     return True
 
+# --- Validation panel renderer ---
+def render_validation_panel():
+    st.markdown("### ✅ Data Validation Panel")
+
+    v = _ensure_validation_state()
+    datasets = ["Stock History", "BDD400", "Plant Capacity", "T&W Forecasts"]
+
+    # Overall readiness badges
+    npi_ready = v.get("Stock History", {}).get("required_ok", False)
+    plan_ready = v.get("BDD400", {}).get("required_ok", False)
+    cap_ready = v.get("Plant Capacity", {}).get("required_ok", False)
+
+    overall_cols = st.columns(3)
+    with overall_cols[0]:
+        st.markdown(f"**NPI Ready**: {'🟢 Yes' if npi_ready else '🔴 No'}")
+    with overall_cols[1]:
+        st.markdown(f"**Planning Overview Ready** (BDD400): {'🟢 Yes' if plan_ready else '🔴 No'}")
+    with overall_cols[2]:
+        st.markdown(f"**Storage Capacity Ready** (Capacity): {'🟢 Yes' if cap_ready else '🔴 No'}")
+
+    st.divider()
+
+    for label in datasets:
+        detail = v.get(label)
+        st.subheader(f"📄 {label}")
+        if detail is None:
+            st.info("No data loaded yet.")
+            continue
+
+        cols_top = st.columns(4)
+        with cols_top[0]:
+            st.metric("Rows", value=detail.get("rows", 0))
+        with cols_top[1]:
+            dm = detail.get("date_min")
+            st.metric("Min Date", value=(dm.strftime("%Y-%m-%d") if isinstance(dm, pd.Timestamp) else "—"))
+        with cols_top[2]:
+            dx = detail.get("date_max")
+            st.metric("Max Date", value=(dx.strftime("%Y-%m-%d") if isinstance(dx, pd.Timestamp) else "—"))
+        with cols_top[3]:
+            st.metric("Required OK", value="✅" if detail.get("required_ok", False) else "❌")
+
+        missing_req = detail.get("missing_required", [])
+        missing_exp = detail.get("missing_expected", [])
+        auto_created = detail.get("auto_created", [])
+        notes = detail.get("notes", [])
+
+        if missing_req:
+            st.error(f"Missing **required** columns: {missing_req}")
+        else:
+            st.success("All required columns are present.")
+
+        if missing_exp:
+            st.warning(f"Missing **expected** (optional) columns: {missing_exp}")
+
+        if auto_created:
+            st.info(f"Auto‑created columns set to 0 (for compatibility): {auto_created}")
+
+        if notes:
+            st.caption("Notes: " + " | ".join(notes))
+
+        st.divider()
+
 # --- DATA LOAD PAGE ---
 if selection == "Data load":
     st.header("📂 Data Management")
@@ -219,6 +399,69 @@ if selection == "Data load":
                 df_parquet = load_parquet_if_exists(label)
                 if df_parquet is not None:
                     st.session_state["data"][label] = df_parquet
+                    # Validation for cached data (best-effort; auto_created may be unknown)
+                    df_tmp = df_parquet
+                    # Recompute validation snapshots for visibility
+                    if label == "BDD400":
+                        required = ["DateStamp", "PlantID", "ClosingInventory"]
+                        detail = {
+                            "rows": int(len(df_tmp)),
+                            "required_ok": all(c in df_tmp.columns for c in required),
+                            "missing_required": [c for c in required if c not in df_tmp.columns],
+                            "missing_expected": [],
+                            "auto_created": [],
+                            "date_min": _compute_basic_stats(df_tmp, "DateStamp")["date_min"],
+                            "date_max": _compute_basic_stats(df_tmp, "DateStamp")["date_max"],
+                            "notes": ["Loaded from cache (Parquet)"]
+                        }
+                        _record_validation(label, detail)
+                    elif label == "Stock History":
+                        # Check for either DateStamp or Period
+                        has_ds = "DateStamp" in df_tmp.columns
+                        has_period = "Period" in df_tmp.columns
+                        missing_req = []
+                        if not (has_ds or has_period):
+                            missing_req.append("DateStamp_or_Period")
+                        if "PlantID" not in df_tmp.columns:
+                            missing_req.append("PlantID")
+                        if "SapCode" not in df_tmp.columns:
+                            missing_req.append("SapCode")
+                        detail = {
+                            "rows": int(len(df_tmp)),
+                            "required_ok": len(missing_req) == 0,
+                            "missing_required": missing_req,
+                            "missing_expected": [c for c in (NPI_COLUMNS + ALL_STOCK_COLUMNS) if c not in df_tmp.columns],
+                            "auto_created": [],
+                            "date_min": _compute_basic_stats(df_tmp, "DateStamp")["date_min"] if has_ds else None,
+                            "date_max": _compute_basic_stats(df_tmp, "DateStamp")["date_max"] if has_ds else None,
+                            "notes": ["Loaded from cache (Parquet)"]
+                        }
+                        _record_validation(label, detail)
+                    elif label == "Plant Capacity":
+                        required = ["PlantID", "MaxCapacity"]
+                        detail = {
+                            "rows": int(len(df_tmp)),
+                            "required_ok": all(c in df_tmp.columns for c in required),
+                            "missing_required": [c for c in required if c not in df_tmp.columns],
+                            "missing_expected": [],
+                            "auto_created": [],
+                            "date_min": _compute_basic_stats(df_tmp, "DateStamp")["date_min"] if "DateStamp" in df_tmp.columns else None,
+                            "date_max": _compute_basic_stats(df_tmp, "DateStamp")["date_max"] if "DateStamp" in df_tmp.columns else None,
+                            "notes": ["Loaded from cache (Parquet)"]
+                        }
+                        _record_validation(label, detail)
+                    else:
+                        detail = {
+                            "rows": int(len(df_tmp)),
+                            "required_ok": True,
+                            "missing_required": [],
+                            "missing_expected": [],
+                            "auto_created": [],
+                            "date_min": _compute_basic_stats(df_tmp, "DateStamp")["date_min"] if "DateStamp" in df_tmp.columns else None,
+                            "date_max": _compute_basic_stats(df_tmp, "DateStamp")["date_max"] if "DateStamp" in df_tmp.columns else None,
+                            "notes": ["Loaded from cache (Parquet)", "No strict validation rules configured for this dataset yet."]
+                        }
+                        _record_validation(label, detail)
                 else:
                     # Fallback to default local files
                     if os.path.exists(fname):
@@ -231,10 +474,15 @@ if selection == "Data load":
                         save_as_parquet(df_loaded, label)
 
             # Status badge
+            v = st.session_state["validation_detail"].get(label)
             if st.session_state["data"][label] is not None:
-                st.success(f"✅ {label} Active")
+                status_ok = v.get("required_ok", False) if v else False
+                st.success(f"✅ {label} Active" + ("" if status_ok else " — but has validation issues"))
             else:
                 st.warning(f"⚠️ {label} missing")
+
+    st.divider()
+    render_validation_panel()
 
 # --- NPI MANAGEMENT ---
 elif selection == "Non‑Productive Inventory (NPI) Management":
@@ -244,36 +492,62 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
         st.error("Please upload Stock History first.")
         st.stop()
 
-    # Period→DateStamp (Stock History only) — safety in case old parquet is cached
+    # Period→DateStamp safety (in case cached parquet predates change)
     if "Period" in df.columns and "DateStamp" not in df.columns:
         df = df.rename(columns={"Period": "DateStamp"})
-        try:
-            df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
-            df = df.dropna(subset=["DateStamp"])
-        except Exception:
-            pass
+    if "DateStamp" not in df.columns:
+        st.error("Stock History is missing the 'DateStamp' (Period) column.")
+        st.stop()
 
-    # NEW: Ensure NPI & stock columns exist at runtime (double safety)
+    # Normalize datetime
+    df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
+    df = df.dropna(subset=["DateStamp"])
+
+    # Ensure base ID columns exist (hard requirement for NPI logic)
+    if "PlantID" not in df.columns or "SapCode" not in df.columns:
+        st.error("Stock History must include 'PlantID' and 'SapCode' columns.")
+        st.stop()
+
+    # Ensure NPI & stock columns exist at runtime (double safety + numeric)
+    missing_npi, missing_stock = [], []
     for c in NPI_COLUMNS:
         if c not in df.columns:
+            missing_npi.append(c)
             df[c] = 0
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
     for c in ALL_STOCK_COLUMNS:
         if c not in df.columns:
+            missing_stock.append(c)
             df[c] = 0
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    if missing_npi or missing_stock:
+        st.warning(
+            f"Some columns were missing and auto‑created as 0 — "
+            f"NPI: {missing_npi or 'none'}, Stock: {missing_stock or 'none'}"
+        )
 
     # Compute fresh NPI metrics
     df_aug = compute_npi_days_duckdb(df, NPI_COLUMNS)
     latest_date = df_aug["DateStamp"].max()
     df_latest = df_aug[df_aug["DateStamp"] == latest_date]
 
-    # --- TOP SUMMARY ---
+    # --- TOP SUMMARY (defensive against missing columns) ---
     st.subheader(f"📋 Global Plant Summary (As of {latest_date:%Y-%m-%d})")
-    summary = (
-        df_latest.groupby("PlantID")[ALL_STOCK_COLUMNS]
-        .sum()
-        .reset_index()
-    )
-    st.dataframe(summary, use_container_width=True)
+    available_cols = [c for c in ALL_STOCK_COLUMNS if c in df_latest.columns]
+    if not available_cols:
+        st.info("No stock columns available to summarize for the latest date.")
+    else:
+        # Ensure numeric for safety
+        df_latest[available_cols] = df_latest[available_cols].apply(
+            pd.to_numeric, errors="coerce"
+        ).fillna(0)
+        summary = (
+            df_latest.groupby("PlantID")[available_cols]
+            .sum()
+            .reset_index()
+        )
+        st.dataframe(summary, use_container_width=True)
 
     # --- Tabs ---
     tab1, tab2, tab3, tab4 = st.tabs([
