@@ -77,6 +77,16 @@ def load_file_content(file_path_or_buffer, label):
             if "DateStamp" in df.columns:
                 df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
                 df = df.dropna(subset=["DateStamp"])
+
+            # NEW: Ensure NPI columns exist (create as zeros if missing)
+            for c in NPI_COLUMNS:
+                if c not in df.columns:
+                    df[c] = 0
+            # Also ensure stock columns used in summary exist
+            for c in ALL_STOCK_COLUMNS:
+                if c not in df.columns:
+                    df[c] = 0
+
         else:
             # Generic DateStamp parsing for other files (if they have DateStamp)
             if "DateStamp" in df.columns:
@@ -100,6 +110,11 @@ if "data" not in st.session_state:
 # --- DuckDB NPI Computation (no caching!) ---
 def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.DataFrame:
     df2 = df.copy()
+
+    # NEW: Defensive — create any missing NPI columns as zeros
+    for c in npi_categories:
+        if c not in df2.columns:
+            df2[c] = 0
 
     # Ensure numeric cols
     for c in npi_categories:
@@ -237,6 +252,14 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
             df = df.dropna(subset=["DateStamp"])
         except Exception:
             pass
+
+    # NEW: Ensure NPI & stock columns exist at runtime (double safety)
+    for c in NPI_COLUMNS:
+        if c not in df.columns:
+            df[c] = 0
+    for c in ALL_STOCK_COLUMNS:
+        if c not in df.columns:
+            df[c] = 0
 
     # Compute fresh NPI metrics
     df_aug = compute_npi_days_duckdb(df, NPI_COLUMNS)
@@ -576,5 +599,6 @@ elif selection == "Storage Capacity Management":
 else:
     st.header(selection)
     st.info("Implementation pending.")
+
 
 
