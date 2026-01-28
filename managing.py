@@ -70,6 +70,86 @@ def parse_week_string(week_str):
         return None
     return week_str
 
+# --- Column Normalization ---
+def normalize_columns(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
+    """
+    Normalize column names to app expectations.
+    - Remove surrounding [] brackets
+    - Strip and collapse spaces/underscores
+    - Apply known aliases (case-insensitive)
+    """
+    def clean_one(col: str) -> str:
+        c = str(col).strip()
+        # remove leading/trailing square brackets if present: [ColName] -> ColName
+        if len(c) >= 2 and c[0] == '[' and c[-1] == ']':
+            c = c[1:-1]
+        c = c.strip()
+        # replace runs of whitespace with single space
+        c = re.sub(r'\s+', ' ', c)
+        # replace spaces with underscore
+        c = c.replace(' ', '_')
+        # collapse multiple underscores
+        c = re.sub(r'_+', '_', c)
+        return c
+
+    # First pass: strip brackets and clean separators
+    new_cols = [clean_one(c) for c in df.columns]
+
+    # Build alias map (lowercase keys) to canonical names
+    # NOTE: Only include aliases that may vary; generic clean handles []/spaces
+    alias_map = {
+        # dates
+        'period': 'DateStamp',         # Stock History specific
+        'datestamp': 'DateStamp',
+        # ids / descriptors
+        'sapcode': 'SapCode',
+        'plantid': 'PlantID',
+        'materialdescription': 'MaterialDescription',
+        'qualitycode': 'QualityCode',
+        'brand': 'Brand',
+        'season': 'Season',
+        'ab': 'AB',
+
+        # stock metrics
+        'physicalstock': 'PhysicalStock',
+        'overagedtireqty': 'OveragedTireQty',   # normalize both "OverAged..." and "Overaged..."
+        'overagedtireqty': 'OveragedTireQty',
+        'intransitqty': 'IntransitQty',
+        'qualityinspectionqty': 'QualityInspectionQty',
+        'blockedstockqty': 'BlockedStockQty',
+        'atponhand': 'ATPonHand',
+
+        # sometimes users include week/year fields; we keep them but don't rely on them
+        'period_year': 'Period_Year',
+        'period__week': 'Period__Week',
+        'period_week': 'Period__Week',
+    }
+
+    def canonicalize(col: str) -> str:
+        key = col.lower()
+        if key in alias_map:
+            return alias_map[key]
+        # If not explicitly mapped, try to match "overaged" variants
+        if key in ('overagedtireqty', 'overagedtireqty', 'overaged_tire_qty', 'overagedtire_qty', 'overagedtyreqty', 'overaged_tireqty', 'overagedtireqty'):
+            return 'OveragedTireQty'
+        return col
+
+    canon_cols = [canonicalize(c) for c in new_cols]
+
+    # De-duplicate while preserving order by appending suffixes if necessary
+    seen = {}
+    final_cols = []
+    for c in canon_cols:
+        if c not in seen:
+            seen[c] = 1
+            final_cols.append(c)
+        else:
+            seen[c] += 1
+            final_cols.append(f"{c}__{seen[c]}")  # avoid duplicate columns silently
+
+    df.columns = final_cols
+    return df
+
 # --- Load Excel/CSV Files (with validation capture) ---
 def load_file_content(file_path_or_buffer, label):
     try:
@@ -85,6 +165,10 @@ def load_file_content(file_path_or_buffer, label):
                 df = pd.read_excel(file_path_or_buffer)
             except:
                 df = pd.read_csv(file_path_or_buffer)
+
+        # Normalize columns early for Stock History (handles [brackets], casing, aliases)
+        if label == "Stock History":
+            df = normalize_columns(df, dataset=label)
 
         # Initialize validation snapshot
         detail = {
@@ -119,7 +203,7 @@ def load_file_content(file_path_or_buffer, label):
         elif label == "Stock History":
             # Required (flex): DateStamp/Period + PlantID + SapCode
             has_ds = "DateStamp" in df.columns
-            has_period = "Period" in df.columns
+            has_period = "Period" in df.columns  # after normalization, this might remain if user provided both
             missing_req = []
             if not (has_ds or has_period):
                 missing_req.append("DateStamp_or_Period")
@@ -136,8 +220,8 @@ def load_file_content(file_path_or_buffer, label):
             missing_expected = [c for c in (NPI_COLUMNS + ALL_STOCK_COLUMNS) if c not in df.columns]
             detail["missing_expected"] = missing_expected.copy()
 
-            # Period→DateStamp (rename)
-            if has_period and not has_ds:
+            # If we still have Period but not DateStamp, upgrade it
+            if "Period" in df.columns and "DateStamp" not in df.columns:
                 df = df.rename(columns={"Period": "DateStamp"})
                 has_ds = True
                 detail["notes"].append("Renamed 'Period' → 'DateStamp'")
@@ -398,6 +482,9 @@ if selection == "Data load":
                 # Try Parquet (fast path)
                 df_parquet = load_parquet_if_exists(label)
                 if df_parquet is not None:
+                    # Normalize columns for Stock History if cached is old format with brackets
+                    if label == "Stock History":
+                        df_parquet = normalize_columns(df_parquet, dataset=label)
                     st.session_state["data"][label] = df_parquet
                     # Validation snapshot for cached data
                     df_tmp = df_parquet
@@ -415,10 +502,9 @@ if selection == "Data load":
                         }
                         _record_validation(label, detail)
                     elif label == "Stock History":
-                        has_ds = "DateStamp" in df_tmp.columns
-                        has_period = "Period" in df_tmp.columns
+                        has_ds = "DateStamp" in df_tmp.columns or "Period" in df_tmp.columns
                         missing_req = []
-                        if not (has_ds or has_period):
+                        if not has_ds:
                             missing_req.append("DateStamp_or_Period")
                         if "PlantID" not in df_tmp.columns:
                             missing_req.append("PlantID")
@@ -430,8 +516,8 @@ if selection == "Data load":
                             "missing_required": missing_req,
                             "missing_expected": [c for c in (NPI_COLUMNS + ALL_STOCK_COLUMNS) if c not in df_tmp.columns],
                             "auto_created": [],
-                            "date_min": _compute_basic_stats(df_tmp, "DateStamp")["date_min"] if has_ds else None,
-                            "date_max": _compute_basic_stats(df_tmp, "DateStamp")["date_max"] if has_ds else None,
+                            "date_min": _compute_basic_stats(df_tmp, "DateStamp")["date_min"] if "DateStamp" in df_tmp.columns else None,
+                            "date_max": _compute_basic_stats(df_tmp, "DateStamp")["date_max"] if "DateStamp" in df_tmp.columns else None,
                             "notes": ["Loaded from cache (Parquet)"]
                         }
                         _record_validation(label, detail)
@@ -490,7 +576,10 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
         st.error("Please upload Stock History first.")
         st.stop()
 
-    # Period→DateStamp safety (in case cached parquet predates change)
+    # If cached df came without normalization (legacy), normalize here as well
+    df = normalize_columns(df, dataset="Stock History")
+
+    # Period→DateStamp safety
     if "Period" in df.columns and "DateStamp" not in df.columns:
         df = df.rename(columns={"Period": "DateStamp"})
     if "DateStamp" not in df.columns:
@@ -890,3 +979,7 @@ elif selection == "Storage Capacity Management":
 else:
     st.header(selection)
     st.info("Implementation pending.")
+
+
+
+
