@@ -346,7 +346,7 @@ def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.D
     return result
 
 # --- Sidebar ---
-st.sidebar.title("Constraint Management")  # <-- updated to replace "App Navigation"
+st.sidebar.title("Constraint Management")
 selection = st.sidebar.radio(
     "Go to:",
     [
@@ -826,9 +826,7 @@ elif selection == "Storage Capacity Management":
         )
     else:
         weeks_df = pd.DataFrame({"DateStamp": pd.to_datetime(future_weeks)})
-        cap_unique = df_cap["PlantID"].drop_duplicates().to_frame().merge(
-            df_cap[["PlantID", "MaxCapacity"]].drop_duplicates(), on="PlantID"
-        )
+        cap_unique = df_cap[["PlantID", "MaxCapacity"]].drop_duplicates()
         weeks_df["key"] = 1
         cap_unique["key"] = 1
         df_cap_week = weeks_df.merge(cap_unique, on="key").drop(columns="key")
@@ -947,9 +945,8 @@ elif selection == "Storage Capacity Management":
         use_container_width=True
     )
 
-# --- MITIGATION PROPOSAL (with tick + sum + download including ticks) ---
+# --- MITIGATION PROPOSAL (with min() logic, tick + download including ticks) ---
 elif selection == "Mitigation Proposal":
-    # Removed st.title("Constraint Management") from here per request
     st.subheader("🧯 Mitigation Proposal")
 
     df_bdd = st.session_state["data"].get("BDD400")
@@ -979,7 +976,7 @@ elif selection == "Mitigation Proposal":
     df_bdd = df_bdd.dropna(subset=["DateStamp"])
     df_stock = df_stock.dropna(subset=["DateStamp"])
 
-    # Key alignment (avoid mismatches on join)
+    # Key alignment
     for _df in (df_bdd, df_stock):
         _df["PlantID"] = _df["PlantID"].astype(str).str.strip()
         _df["SapCode"] = _df["SapCode"].astype(str).str.strip()
@@ -1030,7 +1027,6 @@ elif selection == "Mitigation Proposal":
         ship_latest = pd.DataFrame(columns=["SapCode", "Ship_ATPonHand", "Ship_LastUpdate"])
     else:
         ship_subset["ATPonHand"] = pd.to_numeric(ship_subset["ATPonHand"], errors="coerce")
-        # Keep only rows where ATP is not null when determining "latest"
         ship_non_null = ship_subset.dropna(subset=["ATPonHand"]).copy()
         if ship_non_null.empty:
             st.warning(
@@ -1039,7 +1035,6 @@ elif selection == "Mitigation Proposal":
             )
             ship_latest = pd.DataFrame(columns=["SapCode", "Ship_ATPonHand", "Ship_LastUpdate"])
         else:
-            # Pick the latest timestamp per SapCode
             ship_non_null = ship_non_null.sort_values(["SapCode", "DateStamp"])
             ship_latest_idx = ship_non_null.groupby("SapCode")["DateStamp"].idxmax()
             ship_latest = ship_non_null.loc[ship_latest_idx, ["SapCode", "ATPonHand", "DateStamp"]].rename(
@@ -1050,13 +1045,14 @@ elif selection == "Mitigation Proposal":
     proposal = recv_sorted.merge(ship_latest, on="SapCode", how="left")
 
     # ─────────────────────────────────────────────────────────────────────────────
-    # Selectable "Recommended Material Transfers" with sum & downloadable ticks
+    # Selectable "Recommended Material Transfers"
+    # With RecommendedTransferQty = min(InboundConfirmedPR, Ship_ATPonHand)
     # ─────────────────────────────────────────────────────────────────────────────
     st.subheader("Recommended Material Transfers")
     st.caption(
-        "Materials for the **receiving plant** and selected **week(s)**, aggregated by **InboundConfirmedPR**. "
-        "Shipping plant metric (**ATPonHand**) comes from the **latest non‑null Stock History** entry per SAP. "
-        "Tick **Selected** to include lines in the total and in the export."
+        "Materials for the **receiving plant** and selected **week(s)**. "
+        "The **Recommended Transfer** is the minimum between **InboundConfirmedPR** and "
+        "**Shipping ATPonHand** for each line. Tick **Selected** to include a line in the total and in the export."
     )
 
     display_cols = [
@@ -1067,6 +1063,15 @@ elif selection == "Mitigation Proposal":
     display_cols = [c for c in display_cols if c in proposal.columns]
 
     proposal_view = proposal[display_cols].copy()
+
+    # Compute Recommended Transfer (treat NaN as 0)
+    proposal_view["RecommendedTransferQty"] = (
+        proposal_view[["InboundConfirmedPR", "Ship_ATPonHand"]]
+        .fillna(0)
+        .min(axis=1)
+    )
+
+    # Ensure Selected column exists (default False)
     if "Selected" not in proposal_view.columns:
         proposal_view["Selected"] = False
 
@@ -1079,7 +1084,7 @@ elif selection == "Mitigation Proposal":
     edited = st.data_editor(
         proposal_view,
         use_container_width=True,
-        height=520,
+        height=560,
         hide_index=True,
         key=editor_key,
         column_config={
@@ -1092,24 +1097,35 @@ elif selection == "Mitigation Proposal":
             "MaterialDescription": st.column_config.TextColumn("Material Description", disabled=True, width="medium"),
             "InboundConfirmedPR": st.column_config.NumberColumn("InboundConfirmedPR", format="%.0f", disabled=True),
             "Ship_ATPonHand": st.column_config.NumberColumn("Shipping ATPonHand", format="%.0f", disabled=True),
-            "Ship_LastUpdate": st.column_config.DatetimeColumn("ATP Last Update", disabled=True)
+            "Ship_LastUpdate": st.column_config.DatetimeColumn("ATP Last Update", disabled=True),
+            "RecommendedTransferQty": st.column_config.NumberColumn(
+                "Recommended Transfer (min(PR, ATP))", format="%.0f", disabled=True
+            ),
         }
     )
 
-    # Sum for selected lines
+    # Recompute RecommendedTransferQty defensively on the edited df (in case of any transforms)
+    if {"InboundConfirmedPR", "Ship_ATPonHand"}.issubset(edited.columns):
+        edited["RecommendedTransferQty"] = (
+            edited[["InboundConfirmedPR", "Ship_ATPonHand"]].fillna(0).min(axis=1)
+        )
+    else:
+        edited["RecommendedTransferQty"] = 0
+
+    # Sum for selected lines using RecommendedTransferQty
     sel_mask = edited["Selected"] if "Selected" in edited.columns else pd.Series([False]*len(edited))
     selected_count = int(sel_mask.sum())
-    sum_inbound = float(edited.loc[sel_mask, "InboundConfirmedPR"].sum()) if "InboundConfirmedPR" in edited.columns else 0.0
+    total_recommended = float(edited.loc[sel_mask, "RecommendedTransferQty"].sum())
 
     kpi_cols = st.columns(2)
     with kpi_cols[0]:
         st.metric("Selected lines", f"{selected_count:,}")
     with kpi_cols[1]:
-        st.metric("Sum of InboundConfirmedPR (selected)", f"{sum_inbound:,.0f}")
+        st.metric("Total recommended transfer (selected)", f"{total_recommended:,.0f}")
 
-    # Download including the Selected column
+    # Download including Selected and RecommendedTransferQty
     st.download_button(
-        "⬇️ Download mitigation proposal (CSV) — includes Selected",
+        "⬇️ Download mitigation proposal (CSV) — includes Selected & Recommended Transfer",
         data=edited.to_csv(index=False).encode("utf-8"),
         file_name=f"mitigation_proposal_{receiving_plant}_from_{shipping_plant}_{period_label}.csv",
         mime="text/csv"
