@@ -85,7 +85,7 @@ def normalize_columns(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
         c = c.strip()
         c = re.sub(r'\s+', ' ', c)
         c = c.replace(' ', '_')
-        c = re.sub(r'_+', '_', c)
+        c = re.sub(r'\_+', '_', c)
         return c
 
     new_cols = [clean_one(c) for c in df.columns]
@@ -94,7 +94,6 @@ def normalize_columns(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
         # dates
         'period': 'DateStamp',
         'datestamp': 'DateStamp',
-
         # ids / descriptors
         'sapcode': 'SapCode',
         'plantid': 'PlantID',
@@ -103,19 +102,16 @@ def normalize_columns(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
         'brand': 'Brand',
         'season': 'Season',
         'ab': 'AB',
-
         # stock metrics (used across datasets)
         'physicalstock': 'PhysicalStock',
-        'overagedtireqty': 'OveragedTireQty',  # normalize variants/casing
+        'overagedtireqty': 'OveragedTireQty',
         'intransitqty': 'IntransitQty',
         'qualityinspectionqty': 'QualityInspectionQty',
         'blockedstockqty': 'BlockedStockQty',
         'atponhand': 'ATPonHand',
-
         # BDD400 planning metrics
         'closinginventory': 'ClosingInventory',
         'inboundconfirmedpr': 'InboundConfirmedPR',
-
         # optional helpers
         'period_year': 'Period_Year',
         'period__week': 'Period__Week',
@@ -143,7 +139,6 @@ def normalize_columns(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
         else:
             seen[c] += 1
             final_cols.append(f"{c}__{seen[c]}")
-
     df.columns = final_cols
     return df
 
@@ -256,8 +251,8 @@ def load_file_content(file_path_or_buffer, label):
 
             if auto_created:
                 detail["auto_created"] = sorted(auto_created)
-                if detail["required_ok"] and auto_created:
-                    detail["notes"].append("Some expected columns were missing and were auto‑created with value 0.")
+            if detail["required_ok"] and auto_created:
+                detail["notes"].append("Some expected columns were missing and were auto‑created with value 0.")
 
             stats = _compute_basic_stats(df, "DateStamp")
             detail.update({k: v for k, v in stats.items() if k in ["rows", "date_min", "date_max"]})
@@ -275,9 +270,7 @@ def load_file_content(file_path_or_buffer, label):
                     df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
                 except Exception:
                     pass
-                stats = _compute_basic_stats(df, "DateStamp")
-            else:
-                stats = {"rows": int(len(df)), "date_min": None, "date_max": None}
+            stats = _compute_basic_stats(df, "DateStamp")
             detail.update({k: v for k, v in stats.items() if k in ["rows", "date_min", "date_max"]})
             _record_validation(label, detail)
 
@@ -288,7 +281,6 @@ def load_file_content(file_path_or_buffer, label):
             _record_validation(label, detail)
 
         return df
-
     except Exception as e:
         st.error(f"Error loading {label}: {e}")
         return None
@@ -306,13 +298,11 @@ _ensure_validation_state()
 # --- DuckDB NPI Computation (no caching!) ---
 def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.DataFrame:
     df2 = df.copy()
-
     for c in npi_categories:
         if c not in df2.columns:
             df2[c] = 0
     for c in npi_categories:
         df2[c] = pd.to_numeric(df2[c], errors="coerce").fillna(0)
-
     if "SapCode" not in df2.columns:
         df2["SapCode"] = "UNKNOWN"
     if "PlantID" not in df2.columns:
@@ -356,7 +346,7 @@ def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.D
     return result
 
 # --- Sidebar ---
-st.sidebar.title("App Navigation")
+st.sidebar.title("Constraint Management")  # <-- updated to replace "App Navigation"
 selection = st.sidebar.radio(
     "Go to:",
     [
@@ -387,10 +377,8 @@ def ensure_columns_exist(df: pd.DataFrame, cols: list[str], label: str) -> bool:
 # --- Validation panel renderer ---
 def render_validation_panel():
     st.markdown("### ✅ Data Validation Panel")
-
     v = _ensure_validation_state()
     datasets = ["Stock History", "BDD400", "Plant Capacity", "T&W Forecasts"]
-
     npi_ready = v.get("Stock History", {}).get("required_ok", False)
     plan_ready = v.get("BDD400", {}).get("required_ok", False)
     cap_ready = v.get("Plant Capacity", {}).get("required_ok", False)
@@ -404,7 +392,6 @@ def render_validation_panel():
         st.markdown(f"**Storage Capacity Ready** (Capacity): {'🟢 Yes' if cap_ready else '🔴 No'}")
 
     st.divider()
-
     for label in datasets:
         detail = v.get(label)
         st.subheader(f"📄 {label}")
@@ -433,22 +420,17 @@ def render_validation_panel():
             st.error(f"Missing **required** columns: {missing_req}")
         else:
             st.success("All required columns are present.")
-
         if missing_exp:
             st.warning(f"Missing **expected** (optional) columns: {missing_exp}")
-
         if auto_created:
             st.info(f"Auto‑created columns set to 0 (for compatibility): {auto_created}")
-
         if notes:
-            st.caption("Notes: " + " | ".join(notes))
-
+            st.caption("Notes: " + " \n".join(notes))
         st.divider()
 
 # --- DATA LOAD PAGE ---
 if selection == "Data load":
     st.header("📂 Data Management")
-
     filenames = {
         "Stock History": "StockHistory.xlsx",
         "BDD400": "003BDD400.xlsx",
@@ -465,7 +447,6 @@ if selection == "Data load":
                 type=["xlsx", "csv"],
                 key=f"upload_{label}"
             )
-
             if upload is not None:
                 df_loaded = load_file_content(upload, label)
                 if df_loaded is not None:
@@ -482,6 +463,7 @@ if selection == "Data load":
                     if label in ("Stock History", "BDD400"):
                         df_parquet = normalize_columns(df_parquet, dataset=label)
                     st.session_state["data"][label] = df_parquet
+
                     # Validation snapshot for cached data
                     df_tmp = df_parquet
                     if label == "BDD400":
@@ -576,7 +558,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
         st.stop()
 
     df = normalize_columns(df, dataset="Stock History")
-
     if "Period" in df.columns and "DateStamp" not in df.columns:
         df = df.rename(columns={"Period": "DateStamp"})
     if "DateStamp" not in df.columns:
@@ -631,7 +612,7 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
         "🔍 Material Drilldown",
         "⏳ Accumulation Monitor",
         "📈 Trend Analysis",
-        "🔎 Inventory Search"
+        "🕵️ Inventory Search"
     ])
 
     with tab1:
@@ -703,7 +684,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
     with tab4:
         st.subheader("Search Inventory Records (by Plant & SAP Code)")
         left, right = st.columns([2, 2])
-
         with left:
             plants_all = sorted(df["PlantID"].unique())
             plants_sel = st.multiselect(
@@ -711,7 +691,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
                 options=plants_all,
                 default=plants_all
             )
-
             min_d = pd.to_datetime(df["DateStamp"].min()).date()
             max_d = pd.to_datetime(df["DateStamp"].max()).date()
             date_range = st.date_input(
@@ -721,7 +700,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
                 max_value=max_d,
                 help="Filter records within the selected date range"
             )
-
         df_plant = df[df["PlantID"].isin(plants_sel)] if plants_sel else df.copy()
         with right:
             saps_all = sorted(df_plant["SapCode"].dropna().astype(str).unique())
@@ -736,7 +714,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
             mask &= df["PlantID"].isin(plants_sel)
         if saps_sel:
             mask &= df["SapCode"].astype(str).isin(saps_sel)
-
         if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
             start_dt = pd.to_datetime(date_range[0])
             end_dt = pd.to_datetime(date_range[1]) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
@@ -746,11 +723,9 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
         combined = base_cols + ALL_STOCK_COLUMNS + NPI_COLUMNS
         seen = set()
         cols_to_show = [c for c in combined if not (c in seen or seen.add(c))]
-
         cols_existing = [c for c in cols_to_show if c in df.columns]
         out = df.loc[mask, cols_existing].sort_values(["DateStamp", "PlantID", "SapCode"])
         out = out.loc[:, ~out.columns.duplicated(keep="first")]
-
         st.dataframe(out, use_container_width=True, height=480)
         st.download_button(
             label="⬇️ Download filtered records (CSV)",
@@ -762,7 +737,6 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
 # --- PLANNING OVERVIEW ---
 elif selection == "Planning Overview":
     st.header("🧭 Planning Overview")
-
     df_bdd = st.session_state["data"].get("BDD400")
     if df_bdd is None:
         st.error("Please upload BDD400 first.")
@@ -770,7 +744,6 @@ elif selection == "Planning Overview":
 
     # Normalize BDD400 (covers brackets/casing if any)
     df_bdd = normalize_columns(df_bdd, dataset="BDD400")
-
     if not ensure_columns_exist(df_bdd, ["DateStamp", "PlantID", "ClosingInventory"], "BDD400"):
         st.stop()
 
@@ -796,7 +769,7 @@ elif selection == "Planning Overview":
         .reset_index()
     )
 
-    # Switched orientation: rows = PlantID, columns = DateStamp
+    # rows = PlantID, columns = DateStamp
     pivot_ci = (
         closing.pivot(index="PlantID", columns="DateStamp", values="ClosingInventory")
         .sort_index()
@@ -813,10 +786,8 @@ elif selection == "Planning Overview":
 # --- STORAGE CAPACITY MANAGEMENT ---
 elif selection == "Storage Capacity Management":
     st.header("🏭 Storage Capacity Planning")
-
     df_bdd = st.session_state["data"].get("BDD400")
     df_cap = st.session_state["data"].get("Plant Capacity")
-
     if df_bdd is None:
         st.error("Please upload BDD400 first.")
         st.stop()
@@ -826,7 +797,6 @@ elif selection == "Storage Capacity Management":
 
     # Normalize BDD400 (covers brackets/casing if any)
     df_bdd = normalize_columns(df_bdd, dataset="BDD400")
-
     if not ensure_columns_exist(df_bdd, ["DateStamp", "PlantID", "ClosingInventory"], "BDD400"):
         st.stop()
     if not ensure_columns_exist(df_cap, ["PlantID", "MaxCapacity"], "Plant Capacity"):
@@ -856,7 +826,9 @@ elif selection == "Storage Capacity Management":
         )
     else:
         weeks_df = pd.DataFrame({"DateStamp": pd.to_datetime(future_weeks)})
-        cap_unique = df_cap[["PlantID", "MaxCapacity"]].drop_duplicates()
+        cap_unique = df_cap["PlantID"].drop_duplicates().to_frame().merge(
+            df_cap[["PlantID", "MaxCapacity"]].drop_duplicates(), on="PlantID"
+        )
         weeks_df["key"] = 1
         cap_unique["key"] = 1
         df_cap_week = weeks_df.merge(cap_unique, on="key").drop(columns="key")
@@ -907,14 +879,12 @@ elif selection == "Storage Capacity Management":
     # Append TOTAL row using weekly_totals (per week)
     weekly_delta_ser = weekly_totals.set_index("DateStamp")["Delta"]
     weekly_ratio_ser = weekly_totals.set_index("DateStamp")["Ratio"]
-
     for col in delta_pivot.columns:
         if col not in weekly_delta_ser.index:
             weekly_delta_ser.loc[col] = 0
     for col in ratio_pivot.columns:
         if col not in weekly_ratio_ser.index:
             weekly_ratio_ser.loc[col] = pd.NA
-
     delta_pivot.loc["TOTAL", :] = weekly_delta_ser.reindex(delta_pivot.columns).values
     ratio_pivot.loc["TOTAL", :] = weekly_ratio_ser.reindex(ratio_pivot.columns).values
 
@@ -949,12 +919,10 @@ elif selection == "Storage Capacity Management":
         default=total_plants_all,
         help="Totals below will aggregate only the selected plants."
     )
-
     if selected_plants_for_totals:
         df_merge_sel = df_merge[df_merge["PlantID"].isin(selected_plants_for_totals)]
     else:
         df_merge_sel = df_merge[df_merge["PlantID"].isin([])]
-
     weekly_totals_sel = (
         df_merge_sel.groupby("DateStamp")[["ClosingInventory", "MaxCapacity"]]
         .sum()
@@ -964,7 +932,6 @@ elif selection == "Storage Capacity Management":
     weekly_totals_sel["Ratio"] = weekly_totals_sel.apply(
         lambda r: (r["ClosingInventory"] / r["MaxCapacity"]) if r["MaxCapacity"] else pd.NA, axis=1
     )
-
     totals_display = weekly_totals_sel.set_index("DateStamp").rename(columns={
         "ClosingInventory": "TotalClosingInventory",
         "MaxCapacity": "TotalCapacity"
@@ -980,13 +947,13 @@ elif selection == "Storage Capacity Management":
         use_container_width=True
     )
 
-# --- MITIGATION PROPOSAL ---
+# --- MITIGATION PROPOSAL (with tick + sum + download including ticks) ---
 elif selection == "Mitigation Proposal":
-    st.header("🧯 Mitigation Proposal")
+    # Removed st.title("Constraint Management") from here per request
+    st.subheader("🧯 Mitigation Proposal")
 
     df_bdd = st.session_state["data"].get("BDD400")
     df_stock = st.session_state["data"].get("Stock History")
-
     if df_bdd is None:
         st.error("Please upload BDD400 first.")
         st.stop()
@@ -1001,7 +968,6 @@ elif selection == "Mitigation Proposal":
     # Ensure required fields exist
     needed_bdd = ["DateStamp", "PlantID", "SapCode", "MaterialDescription", "InboundConfirmedPR"]
     needed_stock = ["DateStamp", "PlantID", "SapCode", "ATPonHand"]
-
     if not ensure_columns_exist(df_bdd, needed_bdd, "BDD400"):
         st.stop()
     if not ensure_columns_exist(df_stock, needed_stock, "Stock History"):
@@ -1036,7 +1002,6 @@ elif selection == "Mitigation Proposal":
         format_func=lambda d: pd.to_datetime(d).strftime("%Y-%m-%d"),
         help="You can select one or several periods; inbound PR will be aggregated across them."
     )
-
     if not selected_periods:
         st.info("Please select at least one period.")
         st.stop()
@@ -1057,7 +1022,6 @@ elif selection == "Mitigation Proposal":
     # 2) Shipping plant latest non-null ATP from Stock History
     ship_mask = df_stock["PlantID"] == shipping_plant
     ship_subset = df_stock.loc[ship_mask, ["SapCode", "DateStamp", "ATPonHand"]].copy()
-
     if ship_subset.empty:
         st.warning(
             f"No Stock History rows found for shipping plant **{shipping_plant}**. "
@@ -1085,11 +1049,14 @@ elif selection == "Mitigation Proposal":
     # 3) Merge receiving needs with shipping ATP
     proposal = recv_sorted.merge(ship_latest, on="SapCode", how="left")
 
-    # Display
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Selectable "Recommended Material Transfers" with sum & downloadable ticks
+    # ─────────────────────────────────────────────────────────────────────────────
     st.subheader("Recommended Material Transfers")
     st.caption(
         "Materials for the **receiving plant** and selected **week(s)**, aggregated by **InboundConfirmedPR**. "
-        "Shipping plant metric (**ATPonHand**) comes from the **latest non‑null Stock History** entry per SAP."
+        "Shipping plant metric (**ATPonHand**) comes from the **latest non‑null Stock History** entry per SAP. "
+        "Tick **Selected** to include lines in the total and in the export."
     )
 
     display_cols = [
@@ -1099,24 +1066,51 @@ elif selection == "Mitigation Proposal":
     ]
     display_cols = [c for c in display_cols if c in proposal.columns]
 
-    st.dataframe(
-        proposal[display_cols]
-        .style.format({
-            "InboundConfirmedPR": "{:,.0f}",
-            "Ship_ATPonHand": "{:,.0f}"
-        }),
-        use_container_width=True,
-        height=520
-    )
+    proposal_view = proposal[display_cols].copy()
+    if "Selected" not in proposal_view.columns:
+        proposal_view["Selected"] = False
 
-    # Download label
+    # Scope selection state to receiving/shipping/periods for persistence
     label_start = pd.to_datetime(min(selected_periods)).date()
     label_end = pd.to_datetime(max(selected_periods)).date()
     period_label = f"{label_start}_to_{label_end}" if len(selected_periods) > 1 else f"{label_start}"
+    editor_key = f"rmt_editor__{receiving_plant}__{shipping_plant}__{period_label}"
 
+    edited = st.data_editor(
+        proposal_view,
+        use_container_width=True,
+        height=520,
+        hide_index=True,
+        key=editor_key,
+        column_config={
+            "Selected": st.column_config.CheckboxColumn(
+                "Selected",
+                help="Tick to include this line in the total and in the export.",
+                default=False
+            ),
+            "SapCode": st.column_config.TextColumn("SapCode", disabled=True, width="small"),
+            "MaterialDescription": st.column_config.TextColumn("Material Description", disabled=True, width="medium"),
+            "InboundConfirmedPR": st.column_config.NumberColumn("InboundConfirmedPR", format="%.0f", disabled=True),
+            "Ship_ATPonHand": st.column_config.NumberColumn("Shipping ATPonHand", format="%.0f", disabled=True),
+            "Ship_LastUpdate": st.column_config.DatetimeColumn("ATP Last Update", disabled=True)
+        }
+    )
+
+    # Sum for selected lines
+    sel_mask = edited["Selected"] if "Selected" in edited.columns else pd.Series([False]*len(edited))
+    selected_count = int(sel_mask.sum())
+    sum_inbound = float(edited.loc[sel_mask, "InboundConfirmedPR"].sum()) if "InboundConfirmedPR" in edited.columns else 0.0
+
+    kpi_cols = st.columns(2)
+    with kpi_cols[0]:
+        st.metric("Selected lines", f"{selected_count:,}")
+    with kpi_cols[1]:
+        st.metric("Sum of InboundConfirmedPR (selected)", f"{sum_inbound:,.0f}")
+
+    # Download including the Selected column
     st.download_button(
-        "⬇️ Download mitigation proposal (CSV)",
-        data=proposal[display_cols].to_csv(index=False).encode("utf-8"),
+        "⬇️ Download mitigation proposal (CSV) — includes Selected",
+        data=edited.to_csv(index=False).encode("utf-8"),
         file_name=f"mitigation_proposal_{receiving_plant}_from_{shipping_plant}_{period_label}.csv",
         mime="text/csv"
     )
@@ -1124,4 +1118,7 @@ elif selection == "Mitigation Proposal":
 else:
     st.header(selection)
     st.info("Implementation pending.")
-    
+
+
+
+
