@@ -354,7 +354,8 @@ selection = st.sidebar.radio(
         "Non‑Productive Inventory (NPI) Management",
         "Planning Overview",
         "Storage Capacity Management",
-        "Mitigation Proposal"
+        "Mitigation Proposal",
+        "Mitigation Proposal V2"
     ]
 )
 
@@ -945,7 +946,7 @@ elif selection == "Storage Capacity Management":
         use_container_width=True
     )
 
-# --- MITIGATION PROPOSAL (with min() logic, tick + download including ticks) ---
+# --- MITIGATION PROPOSAL ---
 elif selection == "Mitigation Proposal":
     st.subheader("🧯 Mitigation Proposal")
 
@@ -1044,10 +1045,7 @@ elif selection == "Mitigation Proposal":
     # 3) Merge receiving needs with shipping ATP
     proposal = recv_sorted.merge(ship_latest, on="SapCode", how="left")
 
-    # ─────────────────────────────────────────────────────────────────────────────
     # Selectable "Recommended Material Transfers"
-    # With RecommendedTransferQty = min(InboundConfirmedPR, Ship_ATPonHand)
-    # ─────────────────────────────────────────────────────────────────────────────
     st.subheader("Recommended Material Transfers")
     st.caption(
         "Materials for the **receiving plant** and selected **week(s)**. "
@@ -1104,7 +1102,7 @@ elif selection == "Mitigation Proposal":
         }
     )
 
-    # Recompute RecommendedTransferQty defensively on the edited df (in case of any transforms)
+    # Recompute RecommendedTransferQty defensively
     if {"InboundConfirmedPR", "Ship_ATPonHand"}.issubset(edited.columns):
         edited["RecommendedTransferQty"] = (
             edited[["InboundConfirmedPR", "Ship_ATPonHand"]].fillna(0).min(axis=1)
@@ -1112,7 +1110,7 @@ elif selection == "Mitigation Proposal":
     else:
         edited["RecommendedTransferQty"] = 0
 
-    # Sum for selected lines using RecommendedTransferQty
+    # Sum for selected lines
     sel_mask = edited["Selected"] if "Selected" in edited.columns else pd.Series([False]*len(edited))
     selected_count = int(sel_mask.sum())
     total_recommended = float(edited.loc[sel_mask, "RecommendedTransferQty"].sum())
@@ -1123,11 +1121,254 @@ elif selection == "Mitigation Proposal":
     with kpi_cols[1]:
         st.metric("Total recommended transfer (selected)", f"{total_recommended:,.0f}")
 
-    # Download including Selected and RecommendedTransferQty
+    # Download
     st.download_button(
-        "⬇️ Download mitigation proposal (CSV) — includes Selected & Recommended Transfer",
+        "⬇️ Download mitigation proposal (CSV)",
         data=edited.to_csv(index=False).encode("utf-8"),
         file_name=f"mitigation_proposal_{receiving_plant}_from_{shipping_plant}_{period_label}.csv",
+        mime="text/csv"
+    )
+
+# --- MITIGATION PROPOSAL V2 (Multi-Source + Split) ---
+elif selection == "Mitigation Proposal V2":
+    st.subheader("🧯 Mitigation Proposal V2 (Multi-Source)")
+
+    df_bdd = st.session_state["data"].get("BDD400")
+    df_stock = st.session_state["data"].get("Stock History")
+    if df_bdd is None:
+        st.error("Please upload BDD400 first.")
+        st.stop()
+    if df_stock is None:
+        st.error("Please upload Stock History first.")
+        st.stop()
+
+    # Normalize
+    df_bdd = normalize_columns(df_bdd, dataset="BDD400")
+    df_stock = normalize_columns(df_stock, dataset="Stock History")
+
+    # Required fields
+    needed_bdd = ["DateStamp", "PlantID", "SapCode", "MaterialDescription", "InboundConfirmedPR"]
+    needed_stock = ["DateStamp", "PlantID", "SapCode", "ATPonHand"]
+    if not ensure_columns_exist(df_bdd, needed_bdd, "BDD400"):
+        st.stop()
+    if not ensure_columns_exist(df_stock, needed_stock, "Stock History"):
+        st.stop()
+
+    # Parse dates
+    df_bdd["DateStamp"] = pd.to_datetime(df_bdd["DateStamp"], errors="coerce")
+    df_stock["DateStamp"] = pd.to_datetime(df_stock["DateStamp"], errors="coerce")
+    df_bdd = df_bdd.dropna(subset=["DateStamp"])
+    df_stock = df_stock.dropna(subset=["DateStamp"])
+
+    # Key alignment
+    for _df in (df_bdd, df_stock):
+        _df["PlantID"] = _df["PlantID"].astype(str).str.strip()
+        _df["SapCode"] = _df["SapCode"].astype(str).str.strip()
+
+    # UI Controls
+    plants = sorted(df_bdd["PlantID"].dropna().astype(str).unique())
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        receiving_plant = st.selectbox("Receiving Plant", options=plants, key="recv_plant_v2")
+    with col2:
+        shipping_candidates = [p for p in plants if p != receiving_plant]
+        shipping_plants = st.multiselect("Shipping Plants", options=shipping_candidates, key="ship_plants_v2")
+
+    # Sliders for constraint logic
+    col3, col4 = st.columns(2)
+    with col3:
+        transfer_cap_pct = st.slider(
+            "Max Transfer % of ATP",
+            min_value=5, max_value=100, value=75, step=5,
+            help="Limit transfer to this percentage of the shipping plant's available ATP."
+        )
+    with col4:
+        min_qty_threshold = st.slider(
+            "Minimum Transfer Quantity",
+            min_value=0, max_value=200, value=50, step=10,
+            help="If the calculated transfer quantity is below this value, no transfer is proposed."
+        )
+
+    # Multi-week selection
+    all_periods = sorted(df_bdd["DateStamp"].unique())
+    default_periods = all_periods[-4:] if len(all_periods) >= 4 else all_periods
+    selected_periods = st.multiselect(
+        "Select week(s)",
+        options=all_periods,
+        default=default_periods,
+        format_func=lambda d: pd.to_datetime(d).strftime("%Y-%m-%d"),
+        key="periods_v2"
+    )
+
+    if not selected_periods:
+        st.info("Please select at least one period.")
+        st.stop()
+    if not shipping_plants:
+        st.info("Please select at least one shipping plant.")
+        st.stop()
+
+    # 1. Demand (Receiving Plant)
+    recv_mask = (
+        (df_bdd["PlantID"] == receiving_plant) &
+        (df_bdd["DateStamp"].isin(selected_periods))
+    )
+    recv_df = df_bdd.loc[recv_mask, ["SapCode", "MaterialDescription", "InboundConfirmedPR"]].copy()
+    recv_agg = (
+        recv_df.groupby(["SapCode", "MaterialDescription"], as_index=False)["InboundConfirmedPR"]
+        .sum()
+    )
+    recv_agg["InboundConfirmedPR"] = pd.to_numeric(recv_agg["InboundConfirmedPR"], errors="coerce").fillna(0)
+    recv_agg = recv_agg.sort_values("InboundConfirmedPR", ascending=False).reset_index(drop=True)
+
+    # 2. Supply (Shipping Plants) - Gather ATP and apply Cap
+    supply_frames = []
+    
+    # We will build a dictionary of {SapCode: {Plant: CappedATP}}
+    # But merging dataframes is cleaner for the final table.
+    
+    # Base frame with all requested SapCodes
+    base_sap = recv_agg[["SapCode", "MaterialDescription", "InboundConfirmedPR"]].copy()
+    
+    # Iterate through each selected shipping plant to get its ATP
+    for shp in shipping_plants:
+        s_mask = df_stock["PlantID"] == shp
+        s_subset = df_stock.loc[s_mask, ["SapCode", "DateStamp", "ATPonHand"]].copy()
+        s_subset["ATPonHand"] = pd.to_numeric(s_subset["ATPonHand"], errors="coerce")
+        s_non_null = s_subset.dropna(subset=["ATPonHand"]).sort_values(["SapCode", "DateStamp"])
+        
+        if not s_non_null.empty:
+            # Get latest
+            latest_idx = s_non_null.groupby("SapCode")["DateStamp"].idxmax()
+            latest_atp = s_non_null.loc[latest_idx, ["SapCode", "ATPonHand"]].copy()
+            # Rename
+            col_name = f"ATP_{shp}"
+            latest_atp = latest_atp.rename(columns={"ATPonHand": col_name})
+            # Merge into base
+            base_sap = base_sap.merge(latest_atp, on="SapCode", how="left")
+            base_sap[col_name] = base_sap[col_name].fillna(0)
+        else:
+            base_sap[f"ATP_{shp}"] = 0.0
+
+    # 3. Calculation Logic
+    # Calculate Total Capped Supply available across all selected plants
+    # Capped Supply per plant = ATP * (cap% / 100)
+    
+    cap_ratio = transfer_cap_pct / 100.0
+    
+    # List of ATP columns
+    atp_cols = [f"ATP_{shp}" for shp in shipping_plants]
+    
+    # Create columns for Capped ATP
+    for shp in shipping_plants:
+        base_sap[f"CappedATP_{shp}"] = base_sap[f"ATP_{shp}"] * cap_ratio
+
+    # Total Capped Supply
+    capped_cols = [f"CappedATP_{shp}" for shp in shipping_plants]
+    base_sap["TotalSupplyAvailable"] = base_sap[capped_cols].sum(axis=1)
+    
+    # Calculate Total Recommended Transfer (global)
+    # This is min(Demand, TotalSupplyAvailable)
+    base_sap["GlobalTransferQty"] = base_sap[["InboundConfirmedPR", "TotalSupplyAvailable"]].min(axis=1)
+
+    # Distribute proportionally based on Capped ATP contribution
+    # Qty_i = GlobalTransfer * (CappedATP_i / TotalSupplyAvailable)
+    # Then apply Minimum Quantity Threshold
+    
+    total_rec_transfer_col = "TotalRecommendedTransfer"
+    base_sap[total_rec_transfer_col] = 0.0
+
+    for shp in shipping_plants:
+        atp_col = f"CappedATP_{shp}"
+        alloc_col = f"Transfer_{shp}"
+        
+        # Avoid division by zero
+        base_sap[alloc_col] = base_sap.apply(
+            lambda row: (
+                row["GlobalTransferQty"] * (row[atp_col] / row["TotalSupplyAvailable"])
+            ) if row["TotalSupplyAvailable"] > 0 else 0.0,
+            axis=1
+        )
+        
+        # Apply Minimum Quantity Threshold
+        # If allocated amount < threshold, set to 0. 
+        # (Note: This strictly follows the requirement "if ... less than XX then do not propose". 
+        # This reduces the Global total effectively).
+        base_sap[alloc_col] = base_sap[alloc_col].apply(lambda x: x if x >= min_qty_threshold else 0.0)
+        
+        # Round nicely
+        base_sap[alloc_col] = base_sap[alloc_col].round(0)
+        
+        # Add to the sum
+        base_sap[total_rec_transfer_col] += base_sap[alloc_col]
+
+    # Filter for display (remove rows where total recommended is 0 if desired, but usually seeing 0 is helpful)
+    # Let's clean up the display columns.
+    
+    # Default Selected to False
+    if "Selected" not in base_sap.columns:
+        base_sap["Selected"] = False
+        
+    # Reorder columns for Editor
+    # Fixed: Sap, Material, Selected, InboundPR, TotalSupply, TotalRec
+    # Dynamic: Transfer_{shp}
+    
+    fixed_cols = ["SapCode", "MaterialDescription", "InboundConfirmedPR", "TotalSupplyAvailable", total_rec_transfer_col]
+    transfer_cols = [f"Transfer_{shp}" for shp in shipping_plants]
+    
+    # We also keep raw ATP cols hidden or at end if needed? 
+    # Let's show Transfer cols prominently.
+    
+    final_view = base_sap[["Selected"] + fixed_cols + transfer_cols].copy()
+    
+    # Editor Configuration
+    column_config = {
+        "Selected": st.column_config.CheckboxColumn("Selected", default=False),
+        "SapCode": st.column_config.TextColumn("SapCode", disabled=True),
+        "MaterialDescription": st.column_config.TextColumn("Material", disabled=True),
+        "InboundConfirmedPR": st.column_config.NumberColumn("Total Demand", format="%.0f", disabled=True),
+        "TotalSupplyAvailable": st.column_config.NumberColumn("Total Cap. Supply", format="%.0f", help=f"Sum of ATP * {transfer_cap_pct}%", disabled=True),
+        total_rec_transfer_col: st.column_config.NumberColumn("Total Recommended", format="%.0f", disabled=True),
+    }
+    
+    for shp in shipping_plants:
+        column_config[f"Transfer_{shp}"] = st.column_config.NumberColumn(
+            f"From {shp}", 
+            format="%.0f", 
+            help=f"Allocated from {shp} (Threshold: {min_qty_threshold})",
+            disabled=True
+        )
+
+    st.subheader("Recommended Transfers (Multi-Source)")
+    
+    label_start = pd.to_datetime(min(selected_periods)).date()
+    label_end = pd.to_datetime(max(selected_periods)).date()
+    period_label = f"{label_start}_to_{label_end}" if len(selected_periods) > 1 else f"{label_start}"
+    # Unique key based on parameters
+    editor_key = f"rmt_v2__{receiving_plant}__{len(shipping_plants)}__{period_label}__{transfer_cap_pct}__{min_qty_threshold}"
+
+    edited_v2 = st.data_editor(
+        final_view,
+        use_container_width=True,
+        height=600,
+        hide_index=True,
+        key=editor_key,
+        column_config=column_config
+    )
+
+    # KPIs
+    sel_mask_v2 = edited_v2["Selected"]
+    sel_count = int(sel_mask_v2.sum())
+    sel_vol = float(edited_v2.loc[sel_mask_v2, total_rec_transfer_col].sum())
+    
+    kpi1, kpi2 = st.columns(2)
+    kpi1.metric("Selected Materials", f"{sel_count:,}")
+    kpi2.metric("Total Transfer Quantity", f"{sel_vol:,.0f}")
+
+    # Download
+    st.download_button(
+        "⬇️ Download V2 proposal (CSV)",
+        data=edited_v2.to_csv(index=False).encode("utf-8"),
+        file_name=f"mitigation_proposal_v2_{receiving_plant}_{period_label}.csv",
         mime="text/csv"
     )
 
