@@ -1129,7 +1129,7 @@ elif selection == "Mitigation Proposal":
         mime="text/csv"
     )
 
-# --- MITIGATION PROPOSAL V2 (Fair Share Logic) ---
+# --- MITIGATION PROPOSAL V2 (Fair Share Logic + Smart Defaults) ---
 elif selection == "Mitigation Proposal V2":
     st.subheader("🧯 Mitigation Proposal V2 (Fair Share Distribution)")
 
@@ -1199,7 +1199,6 @@ elif selection == "Mitigation Proposal V2":
     # ==============================================================================
     # 1. CALCULATE DEMAND (Receiving Side)
     # ==============================================================================
-    # Filter BDD for selected Receiving Plants and Periods
     mask_recv = (df_bdd["PlantID"].isin(receiving_plants)) & (df_bdd["DateStamp"].isin(selected_periods))
     df_demand_raw = df_bdd.loc[mask_recv].copy()
 
@@ -1210,7 +1209,7 @@ elif selection == "Mitigation Proposal V2":
         .rename(columns={"PlantID": "ReceivingPlant", "InboundConfirmedPR": "RecvDemand"})
     )
 
-    # Calculate GLOBAL Demand per Material (Sum of all selected receiving plants)
+    # Calculate GLOBAL Demand per Material
     df_global_demand = (
         df_demand.groupby("SapCode")["RecvDemand"]
         .sum()
@@ -1221,8 +1220,7 @@ elif selection == "Mitigation Proposal V2":
     # Merge Global Demand back to calculate Share
     df_demand = df_demand.merge(df_global_demand, on="SapCode", how="left")
     
-    # Calculate Share Ratio: (My Demand / Total Demand)
-    # e.g. Plant 1 (100) / Total (300) = 0.33
+    # Calculate Share Ratio
     df_demand["DemandShare"] = df_demand.apply(
         lambda x: x["RecvDemand"] / x["GlobalDemand"] if x["GlobalDemand"] > 0 else 0, axis=1
     )
@@ -1230,39 +1228,27 @@ elif selection == "Mitigation Proposal V2":
     # ==============================================================================
     # 2. CALCULATE SUPPLY (Shipping Side)
     # ==============================================================================
-    # We need a dataframe of: SapCode | TotalRawATP | ATP_Ship1 | ATP_Ship2 ...
-    
-    # Start with unique SapCodes from the demand side (Left Join anchor)
     sap_codes_needed = df_demand[["SapCode"]].drop_duplicates()
+    atp_data = {} 
     
-    # Helper to store individual plant ATPs
-    atp_data = {} # {SapCode: {Plant1: 100, Plant2: 50}}
-    
-    # Iterate selected shipping plants to find their latest ATP
     for shp in shipping_plants:
         mask_shp = df_stock["PlantID"] == shp
-        # We don't filter by period for stock, we take the LATEST snapshot available
         df_shp = df_stock.loc[mask_shp].copy()
         
         if not df_shp.empty:
             df_shp["ATPonHand"] = pd.to_numeric(df_shp["ATPonHand"], errors="coerce").fillna(0)
-            # Sort by date and take last
             df_latest = df_shp.sort_values("DateStamp").groupby("SapCode").tail(1)
             
-            # Store in dict for easier mapping
             for _, row in df_latest.iterrows():
                 s_code = str(row["SapCode"])
                 qty = float(row["ATPonHand"])
                 if s_code not in atp_data: atp_data[s_code] = {}
                 atp_data[s_code][shp] = qty
 
-    # Construct Supply DataFrame
     supply_rows = []
     for s_code in sap_codes_needed["SapCode"].unique():
         s_code = str(s_code)
         row = {"SapCode": s_code, "TotalRawATP": 0.0}
-        
-        # Get ATPs for this material
         mat_atps = atp_data.get(s_code, {})
         
         for shp in shipping_plants:
@@ -1273,53 +1259,38 @@ elif selection == "Mitigation Proposal V2":
         supply_rows.append(row)
         
     df_supply = pd.DataFrame(supply_rows)
-
-    # Apply the Cap to the Total Raw ATP
-    # User Logic: "I selected to allocate 80% of the ATP."
     df_supply["DistributableSupply"] = df_supply["TotalRawATP"] * (transfer_cap_pct / 100.0)
 
     # ==============================================================================
     # 3. MERGE AND CALCULATE PROPOSAL
     # ==============================================================================
-    # Left join Supply onto Demand (so we keep materials with demand even if ATP is 0)
     df_main = df_demand.merge(df_supply, on="SapCode", how="left")
 
-    # Fill NaNs for materials that had no stock records found
     df_main["TotalRawATP"] = df_main["TotalRawATP"].fillna(0)
     df_main["DistributableSupply"] = df_main["DistributableSupply"].fillna(0)
     for shp in shipping_plants:
-        if f"ATP_{shp}" in df_main.columns:
-            df_main[f"ATP_{shp}"] = df_main[f"ATP_{shp}"].fillna(0)
+        col = f"ATP_{shp}"
+        if col in df_main.columns:
+            df_main[col] = df_main[col].fillna(0)
         else:
-            df_main[f"ATP_{shp}"] = 0.0
+            df_main[col] = 0.0
 
-    # --- THE LOGIC CORRECTION ---
-    # 1. Theoretical Share = Distributable Supply * Demand Share
-    #    (e.g., 80 ATP * 0.33 Share = 26.4)
+    # 1. Theoretical Share
     df_main["TheoreticalShare"] = df_main["DistributableSupply"] * df_main["DemandShare"]
 
     # 2. Cap at actual Demand
-    #    "We should not allocate more than the inboundconfirmedPR"
     df_main["ProposedTotal"] = df_main[["TheoreticalShare", "RecvDemand"]].min(axis=1)
 
     # 3. Apply Minimum Threshold
-    #    "If proposed transfer < XX then do not propose anything"
     df_main["ProposedTotal"] = df_main["ProposedTotal"].apply(
         lambda x: x if x >= min_qty_threshold else 0.0
     )
-    
-    # Round to integer
     df_main["ProposedTotal"] = df_main["ProposedTotal"].round(0)
 
-    # 4. Sourcing Split (Back to Shipping Plants)
-    #    If we decided Plant 1 gets 26 pcs, and Shipping A has 100 ATP while Shipping B has 100 ATP,
-    #    we split the 26 pcs equally (proportional to source ATP).
-    
+    # 4. Sourcing Split
     for shp in shipping_plants:
         atp_col = f"ATP_{shp}"
         out_col = f"From_{shp}"
-        
-        # (My ATP / Total Raw ATP) * Proposed Total for this line
         df_main[out_col] = df_main.apply(
             lambda r: (r[atp_col] / r["TotalRawATP"] * r["ProposedTotal"]) 
                       if r["TotalRawATP"] > 0 else 0, 
@@ -1328,14 +1299,16 @@ elif selection == "Mitigation Proposal V2":
         df_main[out_col] = df_main[out_col].round(0)
 
     # ==============================================================================
-    # 4. DISPLAY
+    # 4. DISPLAY SETUP (Default Selection & Sorting)
     # ==============================================================================
     
-    # Configure Columns
-    df_main["Selected"] = False # Default checkbox
+    # --- AUTO-SELECT LOGIC ---
+    # Select True if ProposedTotal > 0
+    df_main["Selected"] = df_main["ProposedTotal"] > 0
     
-    # Sort for visibility: RecvPlant -> Highest Demand first
-    df_main = df_main.sort_values(["ReceivingPlant", "RecvDemand"], ascending=[True, False])
+    # --- SORTING LOGIC ---
+    # Sort descending by Proposed Quantity, then Receiving Plant
+    df_main = df_main.sort_values(["ProposedTotal", "ReceivingPlant"], ascending=[False, True])
 
     # Columns to show
     cols_to_show = ["Selected", "ReceivingPlant", "SapCode", "MaterialDescription", 
@@ -1360,8 +1333,8 @@ elif selection == "Mitigation Proposal V2":
 
     st.markdown(f"### 📋 Plan Editor ({transfer_cap_pct}% Cap, Threshold: {min_qty_threshold})")
     
-    # Unique key to reset state if parameters change
-    key_v2 = f"editor_v2_fairshare_{len(receiving_plants)}_{len(shipping_plants)}_{transfer_cap_pct}_{min_qty_threshold}"
+    # Unique key to force refresh on param change
+    key_v2 = f"editor_v2_final_{len(receiving_plants)}_{len(shipping_plants)}_{transfer_cap_pct}_{min_qty_threshold}"
     
     edited_df = st.data_editor(
         final_view,
@@ -1378,31 +1351,27 @@ elif selection == "Mitigation Proposal V2":
     st.divider()
     st.subheader("📊 Summary by Receiving Plant")
 
-    # Filter for Checked rows
     df_sel = edited_df[edited_df["Selected"]==True].copy()
 
     if not df_sel.empty:
         agg_map = {"ProposedTotal": "sum", "SapCode": "count"}
-        # Add dynamic ship columns to aggregation
         for shp in shipping_plants:
             agg_map[f"From_{shp}"] = "sum"
 
         summary = df_sel.groupby("ReceivingPlant").agg(agg_map).reset_index()
         summary = summary.rename(columns={"SapCode": "Selected SKUs", "ProposedTotal": "Total Transfer Qty"})
         
-        # Grand Total
         gt = pd.DataFrame(summary.sum(numeric_only=True)).T
         gt["ReceivingPlant"] = "GRAND TOTAL"
         summary = pd.concat([summary, gt], ignore_index=True)
 
-        # Formatting
         fmt = {"Total Transfer Qty": "{:,.0f}", "Selected SKUs": "{:.0f}"}
         for shp in shipping_plants:
             fmt[f"From_{shp}"] = "{:,.0f}"
 
         st.dataframe(summary.style.format(fmt), use_container_width=False)
     else:
-        st.info("Select materials in the table above to see the summary.")
+        st.info("No items selected.")
 
     # ==============================================================================
     # 6. DOWNLOAD
@@ -1413,7 +1382,6 @@ elif selection == "Mitigation Proposal V2":
         file_name=f"mitigation_v2_{datetime.now().strftime('%Y%m%d')}.csv",
         mime="text/csv"
     )
-
 
 else:
     st.header(selection)
