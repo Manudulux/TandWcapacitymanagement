@@ -1037,12 +1037,29 @@ elif selection == "Mitigation Proposal":
 
     # --- UI Controls ---
     all_plants = sorted(df_bdd["PlantID"].dropna().astype(str).unique())
+
+    # ---- Default receiving plants: ES01, IT01 (only those present in data) ----
+    default_receiving = [p for p in ["ES01", "IT01"] if p in all_plants]
+
     col1, col2 = st.columns([1, 1])
     with col1:
-        receiving_plants = st.multiselect("Receiving Plants", options=all_plants, key="recv_plants_v2")
+        receiving_plants = st.multiselect(
+            "Receiving Plants",
+            options=all_plants,
+            default=default_receiving,
+            key="recv_plants_v2"
+        )
+
+    # ---- Shipping candidates exclude receivers; default shipping: FR79 if available ----
     with col2:
         shipping_candidates = [p for p in all_plants if p not in receiving_plants]
-        shipping_plants = st.multiselect("Shipping Plants", options=shipping_candidates, key="ship_plants_v2")
+        default_shipping = [p for p in ["FR79"] if p in shipping_candidates]
+        shipping_plants = st.multiselect(
+            "Shipping Plants",
+            options=shipping_candidates,
+            default=default_shipping,
+            key="ship_plants_v2"
+        )
 
     col3, col4 = st.columns(2)
     with col3:
@@ -1058,11 +1075,16 @@ elif selection == "Mitigation Proposal":
             help="If the calculated proportional share is less than this, do not propose a transfer."
         )
 
-    all_periods = sorted(df_bdd["DateStamp"].unique())
-    default_periods = all_periods[-4:] if len(all_periods) >= 4 else all_periods
+    # ---- Default weeks: next 6 future weeks (fallback to most recent up to 6) ----
+    all_weeks_sorted = sorted(pd.to_datetime(df_bdd["DateStamp"].unique()))
+    today_norm = pd.Timestamp.today().normalize()
+    future_weeks = [w for w in all_weeks_sorted if w >= today_norm]
+    default_periods = future_weeks[:6] if len(future_weeks) > 0 else all_weeks_sorted[-6:]
+    # If fewer than 6 future weeks, we’ll show whatever is available (future first, then fallback above)
+
     selected_periods = st.multiselect(
         "Select week(s)",
-        options=all_periods,
+        options=all_weeks_sorted,
         default=default_periods,
         format_func=lambda d: pd.to_datetime(d).strftime("%Y-%m-%d"),
         key="periods_v2"
@@ -1168,11 +1190,9 @@ elif selection == "Mitigation Proposal":
     # 4. DISPLAY SETUP (Default Selection & Sorting)
     # ==============================================================================
     # --- AUTO-SELECT LOGIC ---
-    # Select True if ProposedTotal > 0
     df_main["Selected"] = df_main["ProposedTotal"] > 0
 
     # --- SORTING LOGIC ---
-    # Sort descending by Proposed Quantity, then Receiving Plant
     df_main = df_main.sort_values(["ProposedTotal", "ReceivingPlant"], ascending=[False, True])
 
     # Columns to show
@@ -1240,7 +1260,6 @@ elif selection == "Mitigation Proposal":
         file_name=f"mitigation_v2_{datetime.now().strftime('%Y%m%d')}.csv",
         mime="text/csv"
     )
-
 else:
     st.header(selection)
     st.info("Implementation pending.")
