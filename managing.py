@@ -110,7 +110,7 @@ def normalize_columns(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
         'closinginventory': 'ClosingInventory',
         'inboundconfirmedpr': 'InboundConfirmedPR',
         # optional helpers
-        'period_year': 'Period_Year',
+        'period_year': 'Period__Year',
         'period__week': 'Period__Week',
         'period_week': 'Period__Week',
     }
@@ -235,6 +235,7 @@ def load_file_content(file_path_or_buffer, label):
                     df[c] = 0
                     auto_created.append(c)
                 df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
             for c in ALL_STOCK_COLUMNS:
                 if c not in df.columns:
                     df[c] = 0
@@ -262,6 +263,7 @@ def load_file_content(file_path_or_buffer, label):
                     df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
                 except Exception:
                     pass
+
             stats = _compute_basic_stats(df, "DateStamp")
             detail.update({k: v for k, v in stats.items() if k in ["rows", "date_min", "date_max"]})
             _record_validation(label, detail)
@@ -285,6 +287,7 @@ if "data" not in st.session_state:
         "Plant Capacity": None,
         "T&W Forecasts": None
     }
+
 _ensure_validation_state()
 
 # --- DuckDB NPI Computation ---
@@ -295,6 +298,7 @@ def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.D
             df2[c] = 0
     for c in npi_categories:
         df2[c] = pd.to_numeric(df2[c], errors="coerce").fillna(0)
+
     if "SapCode" not in df2.columns:
         df2["SapCode"] = "UNKNOWN"
     if "PlantID" not in df2.columns:
@@ -372,6 +376,7 @@ def render_validation_panel():
     st.markdown("### ✅ Data Validation Panel")
     v = _ensure_validation_state()
     datasets = ["Stock History", "BDD400", "Plant Capacity", "T&W Forecasts"]
+
     npi_ready = v.get("Stock History", {}).get("required_ok", False)
     plan_ready = v.get("BDD400", {}).get("required_ok", False)
     cap_ready = v.get("Plant Capacity", {}).get("required_ok", False)
@@ -385,6 +390,7 @@ def render_validation_panel():
         st.markdown(f"**Storage Capacity Ready** (Capacity): {'🟢 Yes' if cap_ready else '🔴 No'}")
 
     st.divider()
+
     for label in datasets:
         detail = v.get(label)
         st.subheader(f"📄 {label}")
@@ -419,11 +425,13 @@ def render_validation_panel():
             st.info(f"Auto‑created columns set to 0 (for compatibility): {auto_created}")
         if notes:
             st.caption("Notes: " + " \n".join(notes))
+
         st.divider()
 
 # --- DATA LOAD PAGE ---
 if selection == "Data load":
     st.header("📂 Data Management")
+
     filenames = {
         "Stock History": "StockHistory.xlsx",
         "BDD400": "003BDD400.xlsx",
@@ -455,13 +463,13 @@ if selection == "Data load":
                     if label in ("Stock History", "BDD400"):
                         df_parquet = normalize_columns(df_parquet, dataset=label)
                     st.session_state["data"][label] = df_parquet
-                    
+
                     # Refresh validation for cached data
                     df_tmp = df_parquet
                     # (Simplified validation refresh for cache hit)
                     detail = {
                         "rows": int(len(df_tmp)),
-                        "required_ok": True, # Assume true if cached, or re-run logic
+                        "required_ok": True,  # Assume true if cached, or re-run logic
                         "missing_required": [],
                         "missing_expected": [],
                         "auto_created": [],
@@ -473,8 +481,7 @@ if selection == "Data load":
                     if label == "BDD400" and not all(c in df_tmp.columns for c in ["DateStamp", "PlantID", "ClosingInventory"]):
                         detail["required_ok"] = False
                     if label == "Stock History" and not all(c in df_tmp.columns for c in ["DateStamp", "PlantID", "SapCode"]):
-                         detail["required_ok"] = False
-                    
+                        detail["required_ok"] = False
                     _record_validation(label, detail)
                 else:
                     if os.path.exists(fname):
@@ -482,16 +489,17 @@ if selection == "Data load":
                     else:
                         alt = fname.replace(".xlsx", ".csv")
                         df_loaded = load_file_content(alt, label) if os.path.exists(alt) else None
+
                     if df_loaded is not None:
                         st.session_state["data"][label] = df_loaded
                         save_as_parquet(df_loaded, label)
 
-            v = st.session_state["validation_detail"].get(label)
-            if st.session_state["data"][label] is not None:
-                status_ok = v.get("required_ok", False) if v else False
-                st.success(f"✅ {label} Active" + ("" if status_ok else " — but has validation issues"))
-            else:
-                st.warning(f"⚠️ {label} missing")
+        v = st.session_state["validation_detail"].get(label)
+        if st.session_state["data"][label] is not None:
+            status_ok = v.get("required_ok", False) if v else False
+            st.success(f"✅ {label} Active" + ("" if status_ok else " — but has validation issues"))
+        else:
+            st.warning(f"⚠️ {label} missing")
 
     st.divider()
     render_validation_panel()
@@ -499,12 +507,14 @@ if selection == "Data load":
 # --- NPI MANAGEMENT ---
 elif selection == "Non‑Productive Inventory (NPI) Management":
     st.header("📉 Non‑Productive Inventory (NPI) Management")
+
     df = st.session_state["data"].get("Stock History")
     if df is None:
         st.error("Please upload Stock History first.")
         st.stop()
 
     df = normalize_columns(df, dataset="Stock History")
+
     if "Period" in df.columns and "DateStamp" not in df.columns:
         df = df.rename(columns={"Period": "DateStamp"})
     if "DateStamp" not in df.columns:
@@ -524,6 +534,7 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
             missing_npi.append(c)
             df[c] = 0
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
     for c in ALL_STOCK_COLUMNS:
         if c not in df.columns:
             missing_stock.append(c)
@@ -647,7 +658,7 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
                 max_value=max_d,
                 help="Filter records within the selected date range"
             )
-        df_plant = df[df["PlantID"].isin(plants_sel)] if plants_sel else df.copy()
+            df_plant = df[df["PlantID"].isin(plants_sel)] if plants_sel else df.copy()
         with right:
             saps_all = sorted(df_plant["SapCode"].dropna().astype(str).unique())
             saps_sel = st.multiselect(
@@ -671,8 +682,10 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
         seen = set()
         cols_to_show = [c for c in combined if not (c in seen or seen.add(c))]
         cols_existing = [c for c in cols_to_show if c in df.columns]
+
         out = df.loc[mask, cols_existing].sort_values(["DateStamp", "PlantID", "SapCode"])
         out = out.loc[:, ~out.columns.duplicated(keep="first")]
+
         st.dataframe(out, use_container_width=True, height=480)
         st.download_button(
             label="⬇️ Download filtered records (CSV)",
@@ -684,54 +697,51 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
 # --- INVENTORY EFFICIENCY ---
 elif selection == "Inventory efficiency":
     st.header("⚡ Inventory Efficiency")
-    
+
     # 1. Load Data
     df = st.session_state["data"].get("Stock History")
     if df is None:
         st.error("Please upload Stock History first.")
         st.stop()
-        
     df = normalize_columns(df, dataset="Stock History")
     df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
     df = df.dropna(subset=["DateStamp"])
-    
+
     # 2. Plant Selection (Single)
     plants = sorted(df["PlantID"].unique())
     selected_plant = st.selectbox("Select Plant", options=plants)
-    
+
     # 3. Filter for latest snapshot first to show list
-    #    We need the latest status for each SKU to determine if it has stock but no ATP
+    # We need the latest status for each SKU to determine if it has stock but no ATP
     latest_date = df[df["PlantID"] == selected_plant]["DateStamp"].max()
-    
     df_plant_latest = df[
-        (df["PlantID"] == selected_plant) & 
+        (df["PlantID"] == selected_plant) &
         (df["DateStamp"] == latest_date)
     ].copy()
-    
+
     # 4. Filter: PhysicalStock > 0 AND (ATPonHand == 0 OR Nan)
-    #    Ensure numeric
+    # Ensure numeric
     cols_to_check = ["PhysicalStock", "ATPonHand"]
     for c in cols_to_check:
         if c not in df_plant_latest.columns:
             df_plant_latest[c] = 0
         df_plant_latest[c] = pd.to_numeric(df_plant_latest[c], errors="coerce").fillna(0)
-        
+
     mask_efficiency = (
-        (df_plant_latest["PhysicalStock"] > 0) & 
+        (df_plant_latest["PhysicalStock"] > 0) &
         (df_plant_latest["ATPonHand"] <= 0)
     )
-    
     df_filtered = df_plant_latest[mask_efficiency].copy()
     df_filtered = df_filtered.sort_values("PhysicalStock", ascending=False)
-    
+
     st.subheader(f"⚠️ SKUs with Physical Stock but No ATP (Plant: {selected_plant})")
     st.caption("Select a row below to see the full inventory history for that material.")
 
     # 5. Display List with Selection
-    #    We show limited columns for clarity
+    # We show limited columns for clarity
     display_cols = ["SapCode", "MaterialDescription", "PhysicalStock", "ATPonHand", "DateStamp"]
     display_cols = [c for c in display_cols if c in df_filtered.columns]
-    
+
     # Use on_select to capture user click
     selection_event = st.dataframe(
         df_filtered[display_cols],
@@ -740,7 +750,7 @@ elif selection == "Inventory efficiency":
         selection_mode="single-row",
         on_select="rerun"
     )
-    
+
     # 6. Show History on Selection
     if selection_event.selection.rows:
         idx = selection_event.selection.rows[0]
@@ -748,34 +758,42 @@ elif selection == "Inventory efficiency":
         # (Streamlit returns row integer index relative to the displayed dataframe)
         selected_sap = df_filtered.iloc[idx]["SapCode"]
         selected_desc = df_filtered.iloc[idx].get("MaterialDescription", "")
-        
         st.divider()
         st.subheader(f"📜 History: {selected_sap} - {selected_desc}")
-        
+
         # Query full history from original DF
         df_history = df[
             (df["PlantID"] == selected_plant) &
             (df["SapCode"] == selected_sap)
         ].copy()
-        
+
         # Sort by Date Descending (Newest First)
         df_history = df_history.sort_values("DateStamp", ascending=False)
-        
-        # Show all relevant stock columns
+
+        # --- MINIMAL FIX START ---
+        # Show all relevant stock columns (deduplicated!)
         hist_cols = ["DateStamp", "SapCode", "PlantID"] + ALL_STOCK_COLUMNS + NPI_COLUMNS
+        # 1) Remove duplicates while preserving order
+        hist_cols = list(dict.fromkeys(hist_cols))
+        # 2) Keep only columns that actually exist
         hist_cols = [c for c in hist_cols if c in df_history.columns]
-        
+        # 3) Also make sure the dataframe itself doesn’t carry duplicate names
+        df_history = df_history.loc[:, ~df_history.columns.duplicated(keep="first")]
+
         st.dataframe(
             df_history[hist_cols],
             use_container_width=True,
             hide_index=True
         )
+        # --- MINIMAL FIX END ---
+
     else:
-        st.info("👆 Click on a material in the table above to view its history.")
+        st.info("👉 Click on a material in the table above to view its history.")
 
 # --- PLANNING OVERVIEW ---
 elif selection == "Planning Overview":
     st.header("🧭 Planning Overview")
+
     df_bdd = st.session_state["data"].get("BDD400")
     if df_bdd is None:
         st.error("Please upload BDD400 first.")
@@ -814,7 +832,6 @@ elif selection == "Planning Overview":
         .sort_index()
         .fillna(0)
     )
-
     st.subheader("Closing Inventory by Plant (Next 18 Weeks)")
     st.dataframe(pivot_ci, use_container_width=True)
 
@@ -825,6 +842,7 @@ elif selection == "Planning Overview":
 # --- STORAGE CAPACITY MANAGEMENT ---
 elif selection == "Storage Capacity Management":
     st.header("🏭 Storage Capacity Planning")
+
     df_bdd = st.session_state["data"].get("BDD400")
     df_cap = st.session_state["data"].get("Plant Capacity")
     if df_bdd is None:
@@ -872,12 +890,11 @@ elif selection == "Storage Capacity Management":
 
     # Merge ClosingInventory with capacities
     df_merge = df_ci.merge(df_cap_week, on=["DateStamp", "PlantID"], how="left")
-
     missing_cap_plants = sorted(df_merge[df_merge["MaxCapacity"].isna()]["PlantID"].unique().tolist())
     if missing_cap_plants:
         st.warning(f"No capacity found for plant(s): {missing_cap_plants}. Treating as 0 capacity for calculation.")
-
     df_merge["MaxCapacity"] = pd.to_numeric(df_merge["MaxCapacity"], errors="coerce").fillna(0)
+
     df_merge["Delta"] = df_merge["ClosingInventory"] - df_merge["MaxCapacity"]
     df_merge["Ratio"] = df_merge.apply(
         lambda r: (r["ClosingInventory"] / r["MaxCapacity"]) if r["MaxCapacity"] else pd.NA,
@@ -916,12 +933,14 @@ elif selection == "Storage Capacity Management":
     # Append TOTAL row using weekly_totals (per week)
     weekly_delta_ser = weekly_totals.set_index("DateStamp")["Delta"]
     weekly_ratio_ser = weekly_totals.set_index("DateStamp")["Ratio"]
+
     for col in delta_pivot.columns:
         if col not in weekly_delta_ser.index:
             weekly_delta_ser.loc[col] = 0
     for col in ratio_pivot.columns:
         if col not in weekly_ratio_ser.index:
             weekly_ratio_ser.loc[col] = pd.NA
+
     delta_pivot.loc["TOTAL", :] = weekly_delta_ser.reindex(delta_pivot.columns).values
     ratio_pivot.loc["TOTAL", :] = weekly_ratio_ser.reindex(ratio_pivot.columns).values
 
@@ -956,10 +975,12 @@ elif selection == "Storage Capacity Management":
         default=total_plants_all,
         help="Totals below will aggregate only the selected plants."
     )
+
     if selected_plants_for_totals:
         df_merge_sel = df_merge[df_merge["PlantID"].isin(selected_plants_for_totals)]
     else:
         df_merge_sel = df_merge[df_merge["PlantID"].isin([])]
+
     weekly_totals_sel = (
         df_merge_sel.groupby("DateStamp")[["ClosingInventory", "MaxCapacity"]]
         .sum()
@@ -969,6 +990,7 @@ elif selection == "Storage Capacity Management":
     weekly_totals_sel["Ratio"] = weekly_totals_sel.apply(
         lambda r: (r["ClosingInventory"] / r["MaxCapacity"]) if r["MaxCapacity"] else pd.NA, axis=1
     )
+
     totals_display = weekly_totals_sel.set_index("DateStamp").rename(columns={
         "ClosingInventory": "TotalClosingInventory",
         "MaxCapacity": "TotalCapacity"
@@ -979,7 +1001,7 @@ elif selection == "Storage Capacity Management":
             "TotalClosingInventory":"{:,.0f}",
             "TotalCapacity":"{:,.0f}",
             "Delta":"{:,.0f}",
-            "Ratio":"{:,.2f}"
+            "Ratio":"{:.2f}"
         }),
         use_container_width=True
     )
@@ -990,7 +1012,7 @@ elif selection == "Mitigation Proposal":
 
     df_bdd = st.session_state["data"].get("BDD400")
     df_stock = st.session_state["data"].get("Stock History")
-    
+
     # --- Basic Checks ---
     if df_bdd is None:
         st.error("Please upload BDD400 first.")
@@ -1002,7 +1024,7 @@ elif selection == "Mitigation Proposal":
     # --- Normalize & Parse Dates ---
     df_bdd = normalize_columns(df_bdd, dataset="BDD400")
     df_stock = normalize_columns(df_stock, dataset="Stock History")
-    
+
     df_bdd["DateStamp"] = pd.to_datetime(df_bdd["DateStamp"], errors="coerce")
     df_stock["DateStamp"] = pd.to_datetime(df_stock["DateStamp"], errors="coerce")
     df_bdd = df_bdd.dropna(subset=["DateStamp"])
@@ -1015,7 +1037,6 @@ elif selection == "Mitigation Proposal":
 
     # --- UI Controls ---
     all_plants = sorted(df_bdd["PlantID"].dropna().astype(str).unique())
-    
     col1, col2 = st.columns([1, 1])
     with col1:
         receiving_plants = st.multiselect("Receiving Plants", options=all_plants, key="recv_plants_v2")
@@ -1074,7 +1095,7 @@ elif selection == "Mitigation Proposal":
 
     # Merge Global Demand back to calculate Share
     df_demand = df_demand.merge(df_global_demand, on="SapCode", how="left")
-    
+
     # Calculate Share Ratio
     df_demand["DemandShare"] = df_demand.apply(
         lambda x: x["RecvDemand"] / x["GlobalDemand"] if x["GlobalDemand"] > 0 else 0, axis=1
@@ -1084,16 +1105,13 @@ elif selection == "Mitigation Proposal":
     # 2. CALCULATE SUPPLY (Shipping Side)
     # ==============================================================================
     sap_codes_needed = df_demand[["SapCode"]].drop_duplicates()
-    atp_data = {} 
-    
+    atp_data = {}
     for shp in shipping_plants:
         mask_shp = df_stock["PlantID"] == shp
         df_shp = df_stock.loc[mask_shp].copy()
-        
         if not df_shp.empty:
             df_shp["ATPonHand"] = pd.to_numeric(df_shp["ATPonHand"], errors="coerce").fillna(0)
             df_latest = df_shp.sort_values("DateStamp").groupby("SapCode").tail(1)
-            
             for _, row in df_latest.iterrows():
                 s_code = str(row["SapCode"])
                 qty = float(row["ATPonHand"])
@@ -1105,14 +1123,11 @@ elif selection == "Mitigation Proposal":
         s_code = str(s_code)
         row = {"SapCode": s_code, "TotalRawATP": 0.0}
         mat_atps = atp_data.get(s_code, {})
-        
         for shp in shipping_plants:
             qty = mat_atps.get(shp, 0.0)
             row[f"ATP_{shp}"] = qty
             row["TotalRawATP"] += qty
-        
         supply_rows.append(row)
-        
     df_supply = pd.DataFrame(supply_rows)
     df_supply["DistributableSupply"] = df_supply["TotalRawATP"] * (transfer_cap_pct / 100.0)
 
@@ -1120,7 +1135,6 @@ elif selection == "Mitigation Proposal":
     # 3. MERGE AND CALCULATE PROPOSAL
     # ==============================================================================
     df_main = df_demand.merge(df_supply, on="SapCode", how="left")
-
     df_main["TotalRawATP"] = df_main["TotalRawATP"].fillna(0)
     df_main["DistributableSupply"] = df_main["DistributableSupply"].fillna(0)
     for shp in shipping_plants:
@@ -1132,23 +1146,20 @@ elif selection == "Mitigation Proposal":
 
     # 1. Theoretical Share
     df_main["TheoreticalShare"] = df_main["DistributableSupply"] * df_main["DemandShare"]
-
     # 2. Cap at actual Demand
     df_main["ProposedTotal"] = df_main[["TheoreticalShare", "RecvDemand"]].min(axis=1)
-
     # 3. Apply Minimum Threshold
     df_main["ProposedTotal"] = df_main["ProposedTotal"].apply(
         lambda x: x if x >= min_qty_threshold else 0.0
     )
     df_main["ProposedTotal"] = df_main["ProposedTotal"].round(0)
-
     # 4. Sourcing Split
     for shp in shipping_plants:
         atp_col = f"ATP_{shp}"
         out_col = f"From_{shp}"
         df_main[out_col] = df_main.apply(
-            lambda r: (r[atp_col] / r["TotalRawATP"] * r["ProposedTotal"]) 
-                      if r["TotalRawATP"] > 0 else 0, 
+            lambda r: (r[atp_col] / r["TotalRawATP"] * r["ProposedTotal"])
+            if r["TotalRawATP"] > 0 else 0,
             axis=1
         )
         df_main[out_col] = df_main[out_col].round(0)
@@ -1156,22 +1167,20 @@ elif selection == "Mitigation Proposal":
     # ==============================================================================
     # 4. DISPLAY SETUP (Default Selection & Sorting)
     # ==============================================================================
-    
     # --- AUTO-SELECT LOGIC ---
     # Select True if ProposedTotal > 0
     df_main["Selected"] = df_main["ProposedTotal"] > 0
-    
+
     # --- SORTING LOGIC ---
     # Sort descending by Proposed Quantity, then Receiving Plant
     df_main = df_main.sort_values(["ProposedTotal", "ReceivingPlant"], ascending=[False, True])
 
     # Columns to show
-    cols_to_show = ["Selected", "ReceivingPlant", "SapCode", "MaterialDescription", 
-                    "RecvDemand", "TotalRawATP", "DistributableSupply", "ProposedTotal"] 
+    cols_to_show = ["Selected", "ReceivingPlant", "SapCode", "MaterialDescription",
+                    "RecvDemand", "TotalRawATP", "DistributableSupply", "ProposedTotal"]
     cols_to_show += [f"From_{shp}" for shp in shipping_plants]
 
     final_view = df_main[cols_to_show].copy()
-
     col_config = {
         "Selected": st.column_config.CheckboxColumn("Select", default=False),
         "ReceivingPlant": st.column_config.TextColumn("Recv Plant", width="small"),
@@ -1182,15 +1191,12 @@ elif selection == "Mitigation Proposal":
         "DistributableSupply": st.column_config.NumberColumn("Distributable", format="%.0f", help=f"ATP * {transfer_cap_pct}%"),
         "ProposedTotal": st.column_config.NumberColumn("Proposed Qty", format="%.0f", help="Min(Distributable * Share, Demand)"),
     }
-    
     for shp in shipping_plants:
         col_config[f"From_{shp}"] = st.column_config.NumberColumn(f"From {shp}", format="%.0f")
 
     st.markdown(f"### 📋 Plan Editor ({transfer_cap_pct}% Cap, Threshold: {min_qty_threshold})")
-    
     # Unique key to force refresh on param change
     key_v2 = f"editor_v2_final_{len(receiving_plants)}_{len(shipping_plants)}_{transfer_cap_pct}_{min_qty_threshold}"
-    
     edited_df = st.data_editor(
         final_view,
         column_config=col_config,
@@ -1205,17 +1211,14 @@ elif selection == "Mitigation Proposal":
     # ==============================================================================
     st.divider()
     st.subheader("📊 Summary by Receiving Plant")
-
     df_sel = edited_df[edited_df["Selected"]==True].copy()
-
     if not df_sel.empty:
         agg_map = {"ProposedTotal": "sum", "SapCode": "count"}
         for shp in shipping_plants:
             agg_map[f"From_{shp}"] = "sum"
-
         summary = df_sel.groupby("ReceivingPlant").agg(agg_map).reset_index()
         summary = summary.rename(columns={"SapCode": "Selected SKUs", "ProposedTotal": "Total Transfer Qty"})
-        
+
         gt = pd.DataFrame(summary.sum(numeric_only=True)).T
         gt["ReceivingPlant"] = "GRAND TOTAL"
         summary = pd.concat([summary, gt], ignore_index=True)
@@ -1241,3 +1244,5 @@ elif selection == "Mitigation Proposal":
 else:
     st.header(selection)
     st.info("Implementation pending.")
+
+
