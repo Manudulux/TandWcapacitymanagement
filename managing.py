@@ -74,9 +74,6 @@ def parse_week_string(week_str):
 def normalize_columns(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
     """
     Normalize column names to app expectations.
-    - Remove surrounding [] brackets
-    - Strip and collapse spaces/underscores
-    - Apply known aliases (case-insensitive)
     """
     def clean_one(col: str) -> str:
         c = str(col).strip()
@@ -122,14 +119,13 @@ def normalize_columns(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
         key = col.lower()
         if key in alias_map:
             return alias_map[key]
-        # Extra guard for weird "OverAged" variants
         if key in ('overagedtireqty', 'overaged_tire_qty', 'overagedtire_qty', 'overagedtyreqty', 'overaged_tireqty', 'overagedtireqty'):
             return 'OveragedTireQty'
         return col
 
     canon_cols = [canonicalize(c) for c in new_cols]
 
-    # De-duplicate while preserving order by appending suffix if necessary
+    # De-duplicate
     seen = {}
     final_cols = []
     for c in canon_cols:
@@ -142,7 +138,7 @@ def normalize_columns(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
     df.columns = final_cols
     return df
 
-# --- Load Excel/CSV Files (with validation capture) ---
+# --- Load Excel/CSV Files ---
 def load_file_content(file_path_or_buffer, label):
     try:
         # Load raw
@@ -158,7 +154,7 @@ def load_file_content(file_path_or_buffer, label):
             except:
                 df = pd.read_csv(file_path_or_buffer)
 
-        # Normalize columns early (Stock History & BDD400)
+        # Normalize columns early
         if label in ("Stock History", "BDD400"):
             df = normalize_columns(df, dataset=label)
 
@@ -176,19 +172,16 @@ def load_file_content(file_path_or_buffer, label):
 
         # === Dataset-specific handling ===
         if label == "BDD400":
-            # Required for planning & mitigation
             required = ["DateStamp", "PlantID", "ClosingInventory"]
             missing_req = [c for c in required if c not in df.columns]
             if missing_req:
                 detail["required_ok"] = False
                 detail["missing_required"] = missing_req
 
-            # Expected (soft) for mitigation proposal
             expected_soft = ["SapCode", "MaterialDescription", "InboundConfirmedPR"]
             missing_soft = [c for c in expected_soft if c not in df.columns]
             detail["missing_expected"] = missing_soft
 
-            # Convert week format, if needed
             if "DateStamp" in df.columns:
                 def _maybe_week_to_dt(x):
                     dt = parse_week_string(x)
@@ -196,7 +189,6 @@ def load_file_content(file_path_or_buffer, label):
                 df["DateStamp"] = df["DateStamp"].apply(_maybe_week_to_dt)
                 df = df.dropna(subset=["DateStamp"])
 
-            # Cast relevant numerics
             for c in ["ClosingInventory", "InboundConfirmedPR"]:
                 if c in df.columns:
                     df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -295,7 +287,7 @@ if "data" not in st.session_state:
     }
 _ensure_validation_state()
 
-# --- DuckDB NPI Computation (no caching!) ---
+# --- DuckDB NPI Computation ---
 def compute_npi_days_duckdb(df: pd.DataFrame, npi_categories: list[str]) -> pd.DataFrame:
     df2 = df.copy()
     for c in npi_categories:
@@ -352,10 +344,10 @@ selection = st.sidebar.radio(
     [
         "Data load",
         "Non‑Productive Inventory (NPI) Management",
+        "Inventory efficiency",
         "Planning Overview",
         "Storage Capacity Management",
-        "Mitigation Proposal",
-        "Mitigation Proposal V2"
+        "Mitigation Proposal"
     ]
 )
 
@@ -460,76 +452,31 @@ if selection == "Data load":
                 # Try Parquet (fast path)
                 df_parquet = load_parquet_if_exists(label)
                 if df_parquet is not None:
-                    # Normalize cached data if needed
                     if label in ("Stock History", "BDD400"):
                         df_parquet = normalize_columns(df_parquet, dataset=label)
                     st.session_state["data"][label] = df_parquet
-
-                    # Validation snapshot for cached data
+                    
+                    # Refresh validation for cached data
                     df_tmp = df_parquet
-                    if label == "BDD400":
-                        required = ["DateStamp", "PlantID", "ClosingInventory"]
-                        missing_req = [c for c in required if c not in df_tmp.columns]
-                        expected_soft = ["SapCode", "MaterialDescription", "InboundConfirmedPR"]
-                        missing_soft = [c for c in expected_soft if c not in df_tmp.columns]
-                        detail = {
-                            "rows": int(len(df_tmp)),
-                            "required_ok": len(missing_req) == 0,
-                            "missing_required": missing_req,
-                            "missing_expected": missing_soft,
-                            "auto_created": [],
-                            "date_min": _compute_basic_stats(df_tmp, "DateStamp")["date_min"] if "DateStamp" in df_tmp.columns else None,
-                            "date_max": _compute_basic_stats(df_tmp, "DateStamp")["date_max"] if "DateStamp" in df_tmp.columns else None,
-                            "notes": ["Loaded from cache (Parquet)"]
-                        }
-                        _record_validation(label, detail)
-                    elif label == "Stock History":
-                        has_ds = "DateStamp" in df_tmp.columns or "Period" in df_tmp.columns
-                        missing_req = []
-                        if not has_ds:
-                            missing_req.append("DateStamp_or_Period")
-                        if "PlantID" not in df_tmp.columns:
-                            missing_req.append("PlantID")
-                        if "SapCode" not in df_tmp.columns:
-                            missing_req.append("SapCode")
-                        detail = {
-                            "rows": int(len(df_tmp)),
-                            "required_ok": len(missing_req) == 0,
-                            "missing_required": missing_req,
-                            "missing_expected": [c for c in (NPI_COLUMNS + ALL_STOCK_COLUMNS) if c not in df_tmp.columns],
-                            "auto_created": [],
-                            "date_min": _compute_basic_stats(df_tmp, "DateStamp")["date_min"] if "DateStamp" in df_tmp.columns else None,
-                            "date_max": _compute_basic_stats(df_tmp, "DateStamp")["date_max"] if "DateStamp" in df_tmp.columns else None,
-                            "notes": ["Loaded from cache (Parquet)"]
-                        }
-                        _record_validation(label, detail)
-                    elif label == "Plant Capacity":
-                        required = ["PlantID", "MaxCapacity"]
-                        detail = {
-                            "rows": int(len(df_tmp)),
-                            "required_ok": all(c in df_tmp.columns for c in required),
-                            "missing_required": [c for c in required if c not in df_tmp.columns],
-                            "missing_expected": [],
-                            "auto_created": [],
-                            "date_min": _compute_basic_stats(df_tmp, "DateStamp")["date_min"] if "DateStamp" in df_tmp.columns else None,
-                            "date_max": _compute_basic_stats(df_tmp, "DateStamp")["date_max"] if "DateStamp" in df_tmp.columns else None,
-                            "notes": ["Loaded from cache (Parquet)"]
-                        }
-                        _record_validation(label, detail)
-                    else:
-                        detail = {
-                            "rows": int(len(df_tmp)),
-                            "required_ok": True,
-                            "missing_required": [],
-                            "missing_expected": [],
-                            "auto_created": [],
-                            "date_min": _compute_basic_stats(df_tmp, "DateStamp")["date_min"] if "DateStamp" in df_tmp.columns else None,
-                            "date_max": _compute_basic_stats(df_tmp, "DateStamp")["date_max"] if "DateStamp" in df_tmp.columns else None,
-                            "notes": ["Loaded from cache (Parquet)", "No strict validation rules configured for this dataset yet."]
-                        }
-                        _record_validation(label, detail)
+                    # (Simplified validation refresh for cache hit)
+                    detail = {
+                        "rows": int(len(df_tmp)),
+                        "required_ok": True, # Assume true if cached, or re-run logic
+                        "missing_required": [],
+                        "missing_expected": [],
+                        "auto_created": [],
+                        "date_min": _compute_basic_stats(df_tmp, "DateStamp")["date_min"] if "DateStamp" in df_tmp.columns else None,
+                        "date_max": _compute_basic_stats(df_tmp, "DateStamp")["date_max"] if "DateStamp" in df_tmp.columns else None,
+                        "notes": ["Loaded from cache (Parquet)"]
+                    }
+                    # A quick check for required cols
+                    if label == "BDD400" and not all(c in df_tmp.columns for c in ["DateStamp", "PlantID", "ClosingInventory"]):
+                        detail["required_ok"] = False
+                    if label == "Stock History" and not all(c in df_tmp.columns for c in ["DateStamp", "PlantID", "SapCode"]):
+                         detail["required_ok"] = False
+                    
+                    _record_validation(label, detail)
                 else:
-                    # Fallback to default local files
                     if os.path.exists(fname):
                         df_loaded = load_file_content(fname, label)
                     else:
@@ -539,7 +486,6 @@ if selection == "Data load":
                         st.session_state["data"][label] = df_loaded
                         save_as_parquet(df_loaded, label)
 
-            # Status badge
             v = st.session_state["validation_detail"].get(label)
             if st.session_state["data"][label] is not None:
                 status_ok = v.get("required_ok", False) if v else False
@@ -734,6 +680,98 @@ elif selection == "Non‑Productive Inventory (NPI) Management":
             file_name="inventory_search_results.csv",
             mime="text/csv"
         )
+
+# --- INVENTORY EFFICIENCY ---
+elif selection == "Inventory efficiency":
+    st.header("⚡ Inventory Efficiency")
+    
+    # 1. Load Data
+    df = st.session_state["data"].get("Stock History")
+    if df is None:
+        st.error("Please upload Stock History first.")
+        st.stop()
+        
+    df = normalize_columns(df, dataset="Stock History")
+    df["DateStamp"] = pd.to_datetime(df["DateStamp"], errors="coerce")
+    df = df.dropna(subset=["DateStamp"])
+    
+    # 2. Plant Selection (Single)
+    plants = sorted(df["PlantID"].unique())
+    selected_plant = st.selectbox("Select Plant", options=plants)
+    
+    # 3. Filter for latest snapshot first to show list
+    #    We need the latest status for each SKU to determine if it has stock but no ATP
+    latest_date = df[df["PlantID"] == selected_plant]["DateStamp"].max()
+    
+    df_plant_latest = df[
+        (df["PlantID"] == selected_plant) & 
+        (df["DateStamp"] == latest_date)
+    ].copy()
+    
+    # 4. Filter: PhysicalStock > 0 AND (ATPonHand == 0 OR Nan)
+    #    Ensure numeric
+    cols_to_check = ["PhysicalStock", "ATPonHand"]
+    for c in cols_to_check:
+        if c not in df_plant_latest.columns:
+            df_plant_latest[c] = 0
+        df_plant_latest[c] = pd.to_numeric(df_plant_latest[c], errors="coerce").fillna(0)
+        
+    mask_efficiency = (
+        (df_plant_latest["PhysicalStock"] > 0) & 
+        (df_plant_latest["ATPonHand"] <= 0)
+    )
+    
+    df_filtered = df_plant_latest[mask_efficiency].copy()
+    df_filtered = df_filtered.sort_values("PhysicalStock", ascending=False)
+    
+    st.subheader(f"⚠️ SKUs with Physical Stock but No ATP (Plant: {selected_plant})")
+    st.caption("Select a row below to see the full inventory history for that material.")
+
+    # 5. Display List with Selection
+    #    We show limited columns for clarity
+    display_cols = ["SapCode", "MaterialDescription", "PhysicalStock", "ATPonHand", "DateStamp"]
+    display_cols = [c for c in display_cols if c in df_filtered.columns]
+    
+    # Use on_select to capture user click
+    selection_event = st.dataframe(
+        df_filtered[display_cols],
+        use_container_width=True,
+        hide_index=True,
+        selection_mode="single-row",
+        on_select="rerun"
+    )
+    
+    # 6. Show History on Selection
+    if selection_event.selection.rows:
+        idx = selection_event.selection.rows[0]
+        # Get the SapCode from the underlying filtered dataframe using the index
+        # (Streamlit returns row integer index relative to the displayed dataframe)
+        selected_sap = df_filtered.iloc[idx]["SapCode"]
+        selected_desc = df_filtered.iloc[idx].get("MaterialDescription", "")
+        
+        st.divider()
+        st.subheader(f"📜 History: {selected_sap} - {selected_desc}")
+        
+        # Query full history from original DF
+        df_history = df[
+            (df["PlantID"] == selected_plant) &
+            (df["SapCode"] == selected_sap)
+        ].copy()
+        
+        # Sort by Date Descending (Newest First)
+        df_history = df_history.sort_values("DateStamp", ascending=False)
+        
+        # Show all relevant stock columns
+        hist_cols = ["DateStamp", "SapCode", "PlantID"] + ALL_STOCK_COLUMNS + NPI_COLUMNS
+        hist_cols = [c for c in hist_cols if c in df_history.columns]
+        
+        st.dataframe(
+            df_history[hist_cols],
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("👆 Click on a material in the table above to view its history.")
 
 # --- PLANNING OVERVIEW ---
 elif selection == "Planning Overview":
@@ -946,192 +984,9 @@ elif selection == "Storage Capacity Management":
         use_container_width=True
     )
 
-# --- MITIGATION PROPOSAL ---
+# --- MITIGATION PROPOSAL (Fair Share Logic + Smart Defaults) ---
 elif selection == "Mitigation Proposal":
-    st.subheader("🧯 Mitigation Proposal")
-
-    df_bdd = st.session_state["data"].get("BDD400")
-    df_stock = st.session_state["data"].get("Stock History")
-    if df_bdd is None:
-        st.error("Please upload BDD400 first.")
-        st.stop()
-    if df_stock is None:
-        st.error("Please upload Stock History first.")
-        st.stop()
-
-    # Normalize both datasets
-    df_bdd = normalize_columns(df_bdd, dataset="BDD400")
-    df_stock = normalize_columns(df_stock, dataset="Stock History")
-
-    # Ensure required fields exist
-    needed_bdd = ["DateStamp", "PlantID", "SapCode", "MaterialDescription", "InboundConfirmedPR"]
-    needed_stock = ["DateStamp", "PlantID", "SapCode", "ATPonHand"]
-    if not ensure_columns_exist(df_bdd, needed_bdd, "BDD400"):
-        st.stop()
-    if not ensure_columns_exist(df_stock, needed_stock, "Stock History"):
-        st.stop()
-
-    # Parse dates
-    df_bdd["DateStamp"] = pd.to_datetime(df_bdd["DateStamp"], errors="coerce")
-    df_stock["DateStamp"] = pd.to_datetime(df_stock["DateStamp"], errors="coerce")
-    df_bdd = df_bdd.dropna(subset=["DateStamp"])
-    df_stock = df_stock.dropna(subset=["DateStamp"])
-
-    # Key alignment
-    for _df in (df_bdd, df_stock):
-        _df["PlantID"] = _df["PlantID"].astype(str).str.strip()
-        _df["SapCode"] = _df["SapCode"].astype(str).str.strip()
-
-    # UI Controls
-    plants = sorted(df_bdd["PlantID"].dropna().astype(str).unique())
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        receiving_plant = st.selectbox("Receiving Plant", options=plants)
-    with col2:
-        shipping_plant = st.selectbox("Shipping Plant", options=[p for p in plants if p != receiving_plant])
-
-    # Multi-week selection
-    all_periods = sorted(df_bdd["DateStamp"].unique())
-    default_periods = all_periods[-4:] if len(all_periods) >= 4 else all_periods
-    selected_periods = st.multiselect(
-        "Select week(s)",
-        options=all_periods,
-        default=default_periods,
-        format_func=lambda d: pd.to_datetime(d).strftime("%Y-%m-%d"),
-        help="You can select one or several periods; inbound PR will be aggregated across them."
-    )
-    if not selected_periods:
-        st.info("Please select at least one period.")
-        st.stop()
-
-    # 1) Receiving plant demand from BDD400 across selected periods
-    recv_mask = (
-        (df_bdd["PlantID"] == receiving_plant) &
-        (df_bdd["DateStamp"].isin(selected_periods))
-    )
-    recv_df = df_bdd.loc[recv_mask, ["SapCode", "MaterialDescription", "InboundConfirmedPR"]].copy()
-    recv_agg = (
-        recv_df.groupby(["SapCode", "MaterialDescription"], as_index=False)["InboundConfirmedPR"]
-        .sum()
-    )
-    recv_agg["InboundConfirmedPR"] = pd.to_numeric(recv_agg["InboundConfirmedPR"], errors="coerce").fillna(0)
-    recv_sorted = recv_agg.sort_values("InboundConfirmedPR", ascending=False).reset_index(drop=True)
-
-    # 2) Shipping plant latest non-null ATP from Stock History
-    ship_mask = df_stock["PlantID"] == shipping_plant
-    ship_subset = df_stock.loc[ship_mask, ["SapCode", "DateStamp", "ATPonHand"]].copy()
-    if ship_subset.empty:
-        st.warning(
-            f"No Stock History rows found for shipping plant **{shipping_plant}**. "
-            f"ATP values will be empty for all materials."
-        )
-        ship_latest = pd.DataFrame(columns=["SapCode", "Ship_ATPonHand", "Ship_LastUpdate"])
-    else:
-        ship_subset["ATPonHand"] = pd.to_numeric(ship_subset["ATPonHand"], errors="coerce")
-        ship_non_null = ship_subset.dropna(subset=["ATPonHand"]).copy()
-        if ship_non_null.empty:
-            st.warning(
-                f"Stock History for shipping plant **{shipping_plant}** contains no non‑null ATPonHand values. "
-                f"ATP will appear empty."
-            )
-            ship_latest = pd.DataFrame(columns=["SapCode", "Ship_ATPonHand", "Ship_LastUpdate"])
-        else:
-            ship_non_null = ship_non_null.sort_values(["SapCode", "DateStamp"])
-            ship_latest_idx = ship_non_null.groupby("SapCode")["DateStamp"].idxmax()
-            ship_latest = ship_non_null.loc[ship_latest_idx, ["SapCode", "ATPonHand", "DateStamp"]].rename(
-                columns={"ATPonHand": "Ship_ATPonHand", "DateStamp": "Ship_LastUpdate"}
-            )
-
-    # 3) Merge receiving needs with shipping ATP
-    proposal = recv_sorted.merge(ship_latest, on="SapCode", how="left")
-
-    # Selectable "Recommended Material Transfers"
-    st.subheader("Recommended Material Transfers")
-    st.caption(
-        "Materials for the **receiving plant** and selected **week(s)**. "
-        "The **Recommended Transfer** is the minimum between **InboundConfirmedPR** and "
-        "**Shipping ATPonHand** for each line. Tick **Selected** to include a line in the total and in the export."
-    )
-
-    display_cols = [
-        "SapCode", "MaterialDescription",
-        "InboundConfirmedPR",
-        "Ship_ATPonHand", "Ship_LastUpdate"
-    ]
-    display_cols = [c for c in display_cols if c in proposal.columns]
-
-    proposal_view = proposal[display_cols].copy()
-
-    # Compute Recommended Transfer (treat NaN as 0)
-    proposal_view["RecommendedTransferQty"] = (
-        proposal_view[["InboundConfirmedPR", "Ship_ATPonHand"]]
-        .fillna(0)
-        .min(axis=1)
-    )
-
-    # Ensure Selected column exists (default False)
-    if "Selected" not in proposal_view.columns:
-        proposal_view["Selected"] = False
-
-    # Scope selection state to receiving/shipping/periods for persistence
-    label_start = pd.to_datetime(min(selected_periods)).date()
-    label_end = pd.to_datetime(max(selected_periods)).date()
-    period_label = f"{label_start}_to_{label_end}" if len(selected_periods) > 1 else f"{label_start}"
-    editor_key = f"rmt_editor__{receiving_plant}__{shipping_plant}__{period_label}"
-
-    edited = st.data_editor(
-        proposal_view,
-        use_container_width=True,
-        height=560,
-        hide_index=True,
-        key=editor_key,
-        column_config={
-            "Selected": st.column_config.CheckboxColumn(
-                "Selected",
-                help="Tick to include this line in the total and in the export.",
-                default=False
-            ),
-            "SapCode": st.column_config.TextColumn("SapCode", disabled=True, width="small"),
-            "MaterialDescription": st.column_config.TextColumn("Material Description", disabled=True, width="medium"),
-            "InboundConfirmedPR": st.column_config.NumberColumn("InboundConfirmedPR", format="%.0f", disabled=True),
-            "Ship_ATPonHand": st.column_config.NumberColumn("Shipping ATPonHand", format="%.0f", disabled=True),
-            "Ship_LastUpdate": st.column_config.DatetimeColumn("ATP Last Update", disabled=True),
-            "RecommendedTransferQty": st.column_config.NumberColumn(
-                "Recommended Transfer (min(PR, ATP))", format="%.0f", disabled=True
-            ),
-        }
-    )
-
-    # Recompute RecommendedTransferQty defensively
-    if {"InboundConfirmedPR", "Ship_ATPonHand"}.issubset(edited.columns):
-        edited["RecommendedTransferQty"] = (
-            edited[["InboundConfirmedPR", "Ship_ATPonHand"]].fillna(0).min(axis=1)
-        )
-    else:
-        edited["RecommendedTransferQty"] = 0
-
-    # Sum for selected lines
-    sel_mask = edited["Selected"] if "Selected" in edited.columns else pd.Series([False]*len(edited))
-    selected_count = int(sel_mask.sum())
-    total_recommended = float(edited.loc[sel_mask, "RecommendedTransferQty"].sum())
-
-    kpi_cols = st.columns(2)
-    with kpi_cols[0]:
-        st.metric("Selected lines", f"{selected_count:,}")
-    with kpi_cols[1]:
-        st.metric("Total recommended transfer (selected)", f"{total_recommended:,.0f}")
-
-    # Download
-    st.download_button(
-        "⬇️ Download mitigation proposal (CSV)",
-        data=edited.to_csv(index=False).encode("utf-8"),
-        file_name=f"mitigation_proposal_{receiving_plant}_from_{shipping_plant}_{period_label}.csv",
-        mime="text/csv"
-    )
-
-# --- MITIGATION PROPOSAL V2 (Fair Share Logic + Smart Defaults) ---
-elif selection == "Mitigation Proposal V2":
-    st.subheader("🧯 Mitigation Proposal V2 (Fair Share Distribution)")
+    st.subheader("🧯 Mitigation Proposal (Fair Share Distribution)")
 
     df_bdd = st.session_state["data"].get("BDD400")
     df_stock = st.session_state["data"].get("Stock History")
